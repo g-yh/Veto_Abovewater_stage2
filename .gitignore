@@ -1,0 +1,16 @@
+# Vivado generated artifacts
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.runs/
+*.gen/
+.Xil/
+
+# Logs and temp files
+*.jou
+*.log
+*.str
+*.wdb
+*.backup.jou
+*.backup.log
