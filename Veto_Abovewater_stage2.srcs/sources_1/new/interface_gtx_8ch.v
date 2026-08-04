@@ -150,6 +150,7 @@ module interface_gtx_8ch(
         //----------- Receive Ports - RX Initialization and Reset Ports ------------
         .gt0_gtrxreset_in               (1'b0),
         .gt0_rxpmareset_in              (~rx_pma_rst_n[0]),    // important
+        .gt0_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         //----------------- Receive Ports - RX8B/10B Decoder Ports -----------------
         .gt0_rxchariscomma_out          (rx_data_is_comma[0 +: 2]),
         .gt0_rxcharisk_out              (rx_data_is_k[0]),
@@ -215,6 +216,7 @@ module interface_gtx_8ch(
         .gt1_rxoutclkfabric_out         (),
         .gt1_gtrxreset_in               (1'b0),
         .gt1_rxpmareset_in              (~rx_pma_rst_n[1]),    // important
+        .gt1_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         .gt1_rxchariscomma_out          (rx_data_is_comma[2 +: 2]),
         .gt1_rxcharisk_out              (rx_data_is_k[1]),
         .gt1_rxresetdone_out            (rx_reset_done[1]),
@@ -270,6 +272,7 @@ module interface_gtx_8ch(
         .gt2_rxoutclkfabric_out         (),
         .gt2_gtrxreset_in               (1'b0),
         .gt2_rxpmareset_in              (~rx_pma_rst_n[2]),    // important
+        .gt2_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         .gt2_rxchariscomma_out          (rx_data_is_comma[4 +: 2]),
         .gt2_rxcharisk_out              (rx_data_is_k[2]),
         .gt2_rxresetdone_out            (rx_reset_done[2]),
@@ -325,6 +328,7 @@ module interface_gtx_8ch(
         .gt3_rxoutclkfabric_out         (),
         .gt3_gtrxreset_in               (1'b0),
         .gt3_rxpmareset_in              (~rx_pma_rst_n[3]),    // important
+        .gt3_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         .gt3_rxchariscomma_out          (rx_data_is_comma[6 +: 2]),
         .gt3_rxcharisk_out              (rx_data_is_k[3]),
         .gt3_rxresetdone_out            (rx_reset_done[3]),
@@ -380,6 +384,7 @@ module interface_gtx_8ch(
         .gt4_rxoutclkfabric_out         (),
         .gt4_gtrxreset_in               (1'b0),
         .gt4_rxpmareset_in              (~rx_pma_rst_n[4]),    // important
+        .gt4_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         .gt4_rxchariscomma_out          (rx_data_is_comma[8 +: 2]),
         .gt4_rxcharisk_out              (rx_data_is_k[4]),
         .gt4_rxresetdone_out            (rx_reset_done[4]),
@@ -435,6 +440,7 @@ module interface_gtx_8ch(
         .gt5_rxoutclkfabric_out         (),
         .gt5_gtrxreset_in               (1'b0),
         .gt5_rxpmareset_in              (~rx_pma_rst_n[5]),    // important
+        .gt5_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         .gt5_rxchariscomma_out          (rx_data_is_comma[10 +: 2]),
         .gt5_rxcharisk_out              (rx_data_is_k[5]),
         .gt5_rxresetdone_out            (rx_reset_done[5]),
@@ -490,6 +496,7 @@ module interface_gtx_8ch(
         .gt6_rxoutclkfabric_out         (),
         .gt6_gtrxreset_in               (1'b0),
         .gt6_rxpmareset_in              (~rx_pma_rst_n[6]),    // important
+        .gt6_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         .gt6_rxchariscomma_out          (rx_data_is_comma[12 +: 2]),
         .gt6_rxcharisk_out              (rx_data_is_k[6]),
         .gt6_rxresetdone_out            (rx_reset_done[6]),
@@ -545,6 +552,7 @@ module interface_gtx_8ch(
         .gt7_rxoutclkfabric_out         (),
         .gt7_gtrxreset_in               (1'b0),
         .gt7_rxpmareset_in              (~rx_pma_rst_n[7]),    // important
+        .gt7_rxpcommaalignen_in         (1'b1),    // enable positive comma alignment
         .gt7_rxchariscomma_out          (rx_data_is_comma[14 +: 2]),
         .gt7_rxcharisk_out              (rx_data_is_k[7]),
         .gt7_rxresetdone_out            (rx_reset_done[7]),
