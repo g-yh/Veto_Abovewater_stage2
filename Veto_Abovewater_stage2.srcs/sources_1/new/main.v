@@ -59,14 +59,17 @@ module main (
     input  wire       TCP_TX_WR,
     input  wire [7:0] TCP_TX_DATA,
 
-    // RBCP (placeholder: slow control slave TBD)
+    // RBCP slow control
     output wire       RBCP_ACT,
-    output wire [31:0] RBCP_ADDR,
-    output wire  [7:0] RBCP_WD,
     output wire       RBCP_WE,
-    output wire       RBCP_RE,
-    input  wire       RBCP_ACK,
-    input  wire  [7:0] RBCP_RD,
+
+    // FIFO read interface (async: read clk = GT clk_txoutclk_bufg)
+    // external module reads FIFO, routes data to correct GT TX
+    output wire [3:0]  rbcp_channel_select,
+    input  wire        rbcp_fifo_rd_clk,
+    input  wire        rbcp_fifo_rd_en,
+    output wire [15:0] rbcp_fifo_rd_data,
+    output wire        rbcp_fifo_empty,
 
     // LED
     // output wire [4:1] LED,
@@ -138,6 +141,37 @@ module main (
     );
 
     //--------------------------------
+    // RBCP slow control (parse host RBCP writes, extract channel + data into FIFO)
+    //--------------------------------
+    wire        rbcp_we;
+    wire [31:0] rbcp_addr;
+    wire [7:0]  rbcp_wd;
+    wire        rbcp_ack;
+    wire [7:0]  rbcp_rd;
+
+    rbcp_slow_control u_rbcp_slow_control (
+        .clk           (CLK_200M),
+        .rst_n         (sysrst_glb_n),
+
+        .RBCP_WE       (rbcp_we),
+        .RBCP_WD       (rbcp_wd),
+        .RBCP_ADDR     (rbcp_addr),
+        .RBCP_RD       (rbcp_rd),
+        .RBCP_ACK      (rbcp_ack),
+
+        .channel_select(rbcp_channel_select),
+
+        .fifo_full       (),
+        .fifo_wr_rst_busy(),
+
+        .fifo_rd_clk     (rbcp_fifo_rd_clk),
+        .fifo_rd_en      (rbcp_fifo_rd_en),
+        .fifo_rd_data    (rbcp_fifo_rd_data),
+        .fifo_empty      (rbcp_fifo_empty),
+        .fifo_rd_rst_busy()
+    );
+
+    //--------------------------------
     // SiTCP subsystem (GMII, ethernet via 1000BASE-X SFP)
     //--------------------------------
     sitcp_top sitcp_top_inst (
@@ -165,15 +199,17 @@ module main (
         .TCP_TX_WR   (TCP_TX_WR),
         .TCP_TX_DATA (TCP_TX_DATA),
 
-        // RBCP IO
+        // RBCP IO (active in 200MHz clk domain)
         .RBCP_ACT    (RBCP_ACT),
-        .RBCP_ADDR   (RBCP_ADDR),
-        .RBCP_WD     (RBCP_WD),
-        .RBCP_WE     (RBCP_WE),
-        .RBCP_RE     (RBCP_RE),
-        .RBCP_ACK    (RBCP_ACK),
-        .RBCP_RD     (RBCP_RD)
+        .RBCP_ADDR   (rbcp_addr),
+        .RBCP_WD     (rbcp_wd),
+        .RBCP_WE     (rbcp_we),
+        .RBCP_RE     (),
+        .RBCP_ACK    (rbcp_ack),
+        .RBCP_RD     (rbcp_rd)
     );
+
+    assign RBCP_WE = rbcp_we;
 
     //--------------------------------
     // 8ch GTX interface (plain data link to 8x stage1 boards, no time_sync)
