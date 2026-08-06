@@ -63,14 +63,6 @@ module main (
     output wire       RBCP_ACT,
     output wire       RBCP_WE,
 
-    // FIFO read interface (async: read clk = GT clk_txoutclk_bufg)
-    // external module reads FIFO, routes data to correct GT TX
-    output wire [3:0]  rbcp_channel_select,
-    input  wire        rbcp_fifo_rd_clk,
-    input  wire        rbcp_fifo_rd_en,
-    output wire [15:0] rbcp_fifo_rd_data,
-    output wire        rbcp_fifo_empty,
-
     // LED
     // output wire [4:1] LED,
     // fan
@@ -149,6 +141,13 @@ module main (
     wire        rbcp_ack;
     wire [7:0]  rbcp_rd;
 
+    // FIFO read interface (GT clk_txoutclk_bufg domain), driven by TX SM below
+    wire        fifo_rd_clk;
+    wire        fifo_rd_en;
+    wire [15:0] fifo_rd_data;
+    wire        fifo_empty;
+    wire        fifo_rd_rst_busy;
+
     rbcp_slow_control u_rbcp_slow_control (
         .clk           (CLK_200M),
         .rst_n         (sysrst_glb_n),
@@ -159,16 +158,14 @@ module main (
         .RBCP_RD       (rbcp_rd),
         .RBCP_ACK      (rbcp_ack),
 
-        .channel_select(rbcp_channel_select),
-
         .fifo_full       (),
         .fifo_wr_rst_busy(),
 
-        .fifo_rd_clk     (rbcp_fifo_rd_clk),
-        .fifo_rd_en      (rbcp_fifo_rd_en),
-        .fifo_rd_data    (rbcp_fifo_rd_data),
-        .fifo_empty      (rbcp_fifo_empty),
-        .fifo_rd_rst_busy()
+        .fifo_rd_clk     (fifo_rd_clk),
+        .fifo_rd_en      (fifo_rd_en),
+        .fifo_rd_data    (fifo_rd_data),
+        .fifo_empty      (fifo_empty),
+        .fifo_rd_rst_busy(fifo_rd_rst_busy)
     );
 
     //--------------------------------
@@ -227,8 +224,8 @@ module main (
     wire [  7:0] rx_pma_rst_n;
     wire [  7:0] clk_txoutclk_bufg;
     wire [  7:0] clk_rxoutclk_bufg;
-    wire [127:0] gt_tx_data;
-    wire [  7:0] gt_tx_data_valid;
+    reg  [127:0] gt_tx_data;
+    reg  [  7:0] gt_tx_data_valid;
     wire [127:0] gt_rx_data;
     wire [  7:0] gt_rx_data_valid;
     wire [  7:0] gtx_cpll_is_lock;
@@ -239,10 +236,76 @@ module main (
     // no time_sync on this link: tie PMA reset to global active-low reset
     assign rx_pma_rst_n = {8{sysrst_glb_n}};
 
-    // GTX TX idle: send K28.7|K28.3 idle chars
-    // (data bridge 8ch GTX <-> SiTCP TCP not built yet)
-    // assign gt_tx_data       = {8{16'hbc3c}};
-    // assign gt_tx_data_valid = 8'b0;
+    //--------------------------------
+    // GT TX slow-control state machine (GT clk_txoutclk_bufg domain)
+    //   Sends the 16-bit slow-control payload on the selected GT channel.
+    //   FIFO entry pairs: word1={8'h00,channel} (routing only), word2={underwater,data}.
+    //   When not sending slow-control data, all channels drive 16'hbc3c idle
+    //   (interface forces txcharisk=11 when gt_tx_data_valid=0 => K28.7|K28.3).
+    // NOTE: this FSM runs on clk_txoutclk_bufg[0]; all 8 GT TX paths share the same
+    //   125M refclk/line rate, so TXUSRCLKs are same frequency. Cross-channel phase
+    //   is not aligned - acceptable for occasional slow-control words, but not for
+    //   a continuous high-rate data bridge.
+    //--------------------------------
+    assign fifo_rd_clk = clk_txoutclk_bufg[0];
+
+    localparam S_IDLE   = 2'd0;
+    localparam S_RD_CH  = 2'd1;
+    localparam S_SEND   = 2'd2;
+
+    reg [1:0]  slow_state;
+    reg [7:0]  slow_ch;
+    reg [15:0] slow_dat;
+
+    // Standard-mode async FIFO: dout = head word whenever empty=0.
+    // A pop happens at the next rising edge while rd_en is high, then
+    // dout updates to the following word. So:
+    //   S_IDLE:  dout=word1={8'h00,channel}; capture channel; rd_en=1 pops word1
+    //   S_RD_CH: dout=word2={underwater,data}; capture data; rd_en=1 pops word2
+    //   S_SEND:  drive selected channel with word2, valid=1 for one TX cycle
+    // Both reads wait on !fifo_empty so a word2 not yet written by the async
+    // write side never causes a garbage capture. Reads also gated on
+    // !fifo_rd_rst_busy so a spurious empty=0 during the FIFO reset window
+    // cannot trigger a bogus read.
+    assign fifo_rd_en = !fifo_rd_rst_busy &&
+                        ((slow_state == S_IDLE && !fifo_empty) ||
+                         (slow_state == S_RD_CH && !fifo_empty));
+
+    always @(posedge fifo_rd_clk or negedge sysrst_glb_n) begin
+        if (!sysrst_glb_n) begin
+            slow_state       <= S_IDLE;
+            slow_ch          <= 8'd0;
+            slow_dat         <= 16'h0000;
+            gt_tx_data       <= {8{16'hbc3c}};
+            gt_tx_data_valid <= 8'b0;
+        end else begin
+            gt_tx_data       <= {8{16'hbc3c}};   // default: idle on all channels
+            gt_tx_data_valid <= 8'b0;
+            case (slow_state)
+                S_IDLE: begin
+                    if (!fifo_empty && !fifo_rd_rst_busy) begin
+                        slow_ch    <= fifo_rd_data[7:0];   // word1 = channel
+                        slow_state <= S_RD_CH;
+                    end
+                end
+                S_RD_CH: begin
+                    if (!fifo_empty && !fifo_rd_rst_busy) begin
+                        slow_dat   <= fifo_rd_data;        // word2 = {underwater,data}
+                        slow_state <= S_SEND;
+                    end
+                end
+                S_SEND: begin
+                    // send the 16-bit payload once on the selected channel
+                    if ((slow_ch >= 8'd1) && (slow_ch <= 8'd8)) begin
+                        gt_tx_data[slow_ch*16 +: 16] <= slow_dat;
+                        gt_tx_data_valid[slow_ch]   <= 1'b1;
+                    end
+                    slow_state <= S_IDLE;
+                end
+                default: slow_state <= S_IDLE;
+            endcase
+        end
+    end
 
     interface_gtx_8ch instance_gtx_interface_8ch (
         .rx_pma_rst_n     (rx_pma_rst_n),

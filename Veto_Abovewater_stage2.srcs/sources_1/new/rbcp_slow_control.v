@@ -5,16 +5,23 @@
 //   address[7:0]  (1~8) as GT channel select,
 //   address[15:8] (1~8) as underwater board select,
 //   data[7:0] as payload.
-//   Channel select output + {underwater_addr, data} written into async FIFO.
-//   External module reads FIFO and routes data to the correct GT channel.
 //
-// FIFO (IP fifo_rbcp): async, 16-bit in/out, standard.
+//   Each RBCP write pushes ONE 32-bit word into the async FIFO:
+//     write data[31:0] = {underwater[7:0], data[7:0], 8'h00, channel[7:0]}
+//   FIFO is width-converting (write 32, read 16, LSB-first):
+//     read word 1 = [15:0]  = {8'h00, channel[7:0]}        : channel routing, NOT sent on GT
+//     read word 2 = [31:16] = {underwater[7:0], data[7:0]} : the 16-bit slow-control
+//                                                            payload actually sent on GT.
+//   Downstream logic (in main.v) reads word 1 to learn the channel, then reads
+//   word 2 and sends it on that channel. The single atomic 32-bit write means a
+//   command pair can never be torn at the async boundary, and ordering is
+//   preserved by the FIFO, so ACK timing is irrelevant to routing correctness.
+//
+// FIFO (IP fifo_rbcp): async, write 32-bit / read 16-bit, standard.
 //   write clock = RBCP 200MHz (clk),
 //   read  clock = GT clk_txoutclk_bufg (rd_clk).
-//   Each entry = {address[15:8], data[7:0]}.
 //
-// RBCP timing: 2-stage pipeline, ACK delayed 2 cycles from WE/RE
-//   (matches RBCP_SlowControl.v reference timing)
+// RBCP timing: ACK delayed 3 cycles from WE (2 pipeline stages + ACK reg).
 //////////////////////////////////////////////////////////////////////////////////
 
 module rbcp_slow_control (
@@ -28,9 +35,6 @@ module rbcp_slow_control (
     output wire [7:0]  RBCP_RD,
     output reg         RBCP_ACK,
 
-    // channel select (directly from address[7:0], combinational)
-    output wire [3:0]  channel_select,
-
     // FIFO write port (200MHz)
     output wire        fifo_full,
     output wire        fifo_wr_rst_busy,
@@ -42,39 +46,43 @@ module rbcp_slow_control (
     output wire        fifo_empty,
     output wire        fifo_rd_rst_busy
 );
-
-    // address[7:0] == 1~8 : stage1 board select (GT channel)
     wire addr_sel = (RBCP_ADDR[7:0] >= 8'd1) && (RBCP_ADDR[7:0] <= 8'd8);
-
-    // channel select: directly from address[7:0]
-    // (external module uses this to route FIFO read data to correct GT TX)
-    assign channel_select = RBCP_ADDR[7:0];
 
     // ------------------------------------------
     // RBCP 2-stage pipeline (matching reference)
     // ------------------------------------------
+    reg        P0WE;
     reg        P1WE;
-    reg [7:0]  P1_WD;
-    reg        P1_ADDR_SEL;
+    reg [7:0]  P0_WD;
+    reg [7:0]  P0_CH;
+    reg [7:0]  P0_UW;
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            P1WE        <= 0;
-            P1_WD       <= 0;
-            P1_ADDR_SEL <= 0;
+            P0WE <= 0;
+            P1WE <= 0;
+            P0_WD <= 0;
+            P0_CH <= 0;
+            P0_UW <= 0;
         end else begin
-            P1WE        <= RBCP_WE;
-            P1_WD       <= RBCP_WD;
-            P1_ADDR_SEL <= addr_sel;
+            // 1st stage: latch WE + fields (RBCP_ADDR held until ACK, so stable)
+            P0WE <= RBCP_WE;
+            P0_WD <= RBCP_WD;
+            P0_CH <= RBCP_ADDR[7:0];      // channel select
+            P0_UW <= RBCP_ADDR[15:8];     // underwater board select
+            // 2nd stage
+            P1WE <= P0WE;
         end
     end
 
-    // FIFO write: capture on P1 cycle (1 cycle after WE pulse)
-    // write data = {underwater_addr, data} = {RBCP_ADDR[15:8], P1_WD}
-    assign fifo_wr_en   = P1WE && P1_ADDR_SEL;
-    wire  fifo_wr_data  = {RBCP_ADDR[15:8], P1_WD};
+    // Single 32-bit FIFO write per RBCP write (addr_sel held stable until ACK).
+    // din[31:0] = {underwater, data, 8'h00, channel}
+    // FIFO width-converts 32->16 LSB-first, so the read side first gets
+    // [15:0] = {8'h00, channel} (routing), then [31:16] = {underwater, data}.
+    assign fifo_wr_en  = addr_sel && P0WE;
+    wire  fifo_wr_data = {P0_UW, P0_WD, 8'h00, P0_CH};
 
-    // ACK: 2 cycles after WE (same as reference RBCP_SlowControl.v)
+    // ACK: 3 cycles after WE (2-stage pipeline + ACK register)
     always @(posedge clk) begin
         if (!rst_n)
             RBCP_ACK <= 0;
