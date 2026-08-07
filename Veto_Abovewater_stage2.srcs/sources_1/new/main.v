@@ -221,20 +221,9 @@ module main (
         .ODIV2()
     );
 
-    wire [  7:0] rx_pma_rst_n;
-    wire [  7:0] clk_txoutclk_bufg;
-    wire [  7:0] clk_rxoutclk_bufg;
-    reg  [127:0] gt_tx_data;
-    reg  [  7:0] gt_tx_data_valid;
-    wire [127:0] gt_rx_data;
-    wire [  7:0] gt_rx_data_valid;
-    wire [  7:0] gtx_cpll_is_lock;
-    wire [  7:0] rx_reset_done;
+    wire [  7:0] gt_link_up;
     wire [ 15:0] rx_data_is_comma;
     wire [  7:0] gtx_rx_error;
-
-    // no time_sync on this link: tie PMA reset to global active-low reset
-    assign rx_pma_rst_n = {8{sysrst_glb_n}};
 
     //--------------------------------
     // GT TX slow-control state machine (GT clk_txoutclk_bufg domain)
@@ -308,7 +297,6 @@ module main (
     end
 
     interface_gtx_8ch instance_gtx_interface_8ch (
-        .rx_pma_rst_n     (rx_pma_rst_n),
         .clk_drp_100M     (CLK_100M),
         .clk_gtx_125M     (clk_gtx_125M),
         .gtx_tx_p         (FE_SFP_TX_P),
@@ -322,7 +310,7 @@ module main (
         .gt_rx_data       (gt_rx_data),
         .gt_rx_data_valid (gt_rx_data_valid),
         .gtx_cpll_is_lock (gtx_cpll_is_lock),
-        .rx_reset_done    (rx_reset_done),
+        .gt_link_up        (gt_link_up),
         .rx_data_is_comma (rx_data_is_comma),
         .gtx_rx_error     (gtx_rx_error)
     );
