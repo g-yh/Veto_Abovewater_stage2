@@ -74,6 +74,3 @@ set_property PACKAGE_PIN V24 [get_ports FAN_PWM]
 
 set_property IOSTANDARD LVCMOS33 [get_ports gt_link_up_led1]
 set_property PACKAGE_PIN U22 [get_ports gt_link_up_led1]
-
-# uw_addr per-channel byte crosses rxoutclk(125M) -> CLK_200M; 2-FF sync in main.v
-set_false_path -from [get_cells uw_addr_reg_reg[*]] -to [get_cells uw_addr_sync1_reg[*]]

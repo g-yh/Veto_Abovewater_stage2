@@ -255,10 +255,6 @@ module main (
     // per-channel captured board word (uw_addr); only low 8 bit meaningful
     reg  [63:0] uw_addr_reg;             // packed [ch*8 +: 8]
 
-    // 2-stage sync of uw_addr into CLK_200M (written on clk_rxoutclk_bufg[ch])
-    (* ASYNC_REG = "TRUE" *) reg [63:0] uw_addr_sync1;
-    (* ASYNC_REG = "TRUE" *) reg [63:0] uw_addr_sync2;
-
     // fifo_ptp (8-in/8-out): write side on rxoutclk, read side on CLK_200M
     reg  [7:0]  ptp_wr_en;
     reg  [7:0]  ptp_rd_en;
@@ -530,16 +526,6 @@ module main (
 
     always @(posedge CLK_200M or negedge sysrst_glb_n) begin
         if (!sysrst_glb_n) begin
-            uw_addr_sync1 <= 64'd0;
-            uw_addr_sync2 <= 64'd0;
-        end else begin
-            uw_addr_sync1 <= uw_addr_reg;
-            uw_addr_sync2 <= uw_addr_sync1;
-        end
-    end
-
-    always @(posedge CLK_200M or negedge sysrst_glb_n) begin
-        if (!sysrst_glb_n) begin
             tx_state     <= TX_IDLE;
             rr_idx       <= 3'd0;
             ptp_tx_cnt   <= 3'd0;
@@ -600,7 +586,7 @@ module main (
                 end
                 TX_ADUW: begin
                     if (!tcp_tx_full) begin
-                        tcp_data    <= uw_addr_sync2[rr_idx*8 +: 8];
+                        tcp_data    <= uw_addr_reg[rr_idx*8 +: 8];
                         tcp_wr      <= 1'b1;
                         evt_tx_cnt  <= 8'd2;
                         tx_state    <= TX_ADATA;
