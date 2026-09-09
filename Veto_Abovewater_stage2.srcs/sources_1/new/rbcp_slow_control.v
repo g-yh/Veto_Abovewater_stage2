@@ -1,27 +1,24 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
 // Module Name: rbcp_slow_control
-// Description: RBCP write slave. Parses host RBCP write packets, extracts
-//   address[7:0]  (1~8) as GT channel select,
-//   address[15:8] (1~8) as underwater board select,
-//   data[7:0] as payload.
+// Description: RBCP write slave. Parses host RBCP write packets and fans them out
+//   to one FIFO per GT channel.
 //
-//   Each RBCP write pushes ONE 32-bit word into the async FIFO:
-//     write data[31:0] = {underwater[7:0], data[7:0], 8'h00, channel[7:0]}
-//   FIFO is width-converting (write 32, read 16, LSB-first):
-//     read word 1 = [15:0]  = {8'h00, channel[7:0]}        : channel routing, NOT sent on GT
-//     read word 2 = [31:16] = {underwater[7:0], data[7:0]} : the 16-bit slow-control
-//                                                            payload actually sent on GT.
-//   Downstream logic (in main.v) reads word 1 to learn the channel, then reads
-//   word 2 and sends it on that channel. The single atomic 32-bit write means a
-//   command pair can never be torn at the async boundary, and ordering is
-//   preserved by the FIFO, so ACK timing is irrelevant to routing correctness.
+//   RBCP_ADDR[7:0]   (1~8)   : GT channel select  -> which fifo_rbcp to write
+//   RBCP_ADDR[15:8]  (1~8)   : underwater board select (payload high byte)
+//   RBCP_WD [7:0]    (1~8)   : payload low byte
 //
-// FIFO (IP fifo_rbcp): async, write 32-bit / read 16-bit, standard.
-//   write clock = RBCP 200MHz (clk),
-//   read  clock = GT clk_txoutclk_bufg (rd_clk).
+//   Each RBCP write pushes ONE 16-bit word into the selected channel FIFO:
+//     din[15:0] = {RBCP_ADDR[15:8], RBCP_WD}
+//   The write clock is CLK_200M (clk); each FIFO's read clock is that GT
+//   channel's clk_txoutclk_bufg (fifo_rd_clk[ch]).  main.v drains each FIFO on
+//   its own GT clock domain and sends the 16-bit word down that GT link.
 //
-// RBCP timing: ACK delayed 3 cycles from WE (2 pipeline stages + ACK reg).
+//   ive 8 instances of IP fifo_rbcp (16-bit in / 16-bit out, async):
+//   wr_clk = clk (200M), rd_clk = fifo_rd_clk[ch].
+//
+// RBCP timing: ACK delayed 3 cycles from WE (2 pipeline stages + ACK reg),
+// independent of FIFO-full (fixed 3-cycle ACK).
 //////////////////////////////////////////////////////////////////////////////////
 
 module rbcp_slow_control (
@@ -35,17 +32,18 @@ module rbcp_slow_control (
     output wire [7:0]  RBCP_RD,
     output reg         RBCP_ACK,
 
-    // FIFO write port (200MHz)
-    output wire        fifo_full,
-    output wire        fifo_wr_rst_busy,
+    // Per-channel FIFO write flags (200MHz) - optional debug
+    output wire [7:0]  fifo_full,
+    output wire [7:0]  fifo_wr_rst_busy,
 
-    // FIFO read port (GT clk_txoutclk_bufg domain)
-    input  wire        fifo_rd_clk,
-    input  wire        fifo_rd_en,
-    output wire [15:0] fifo_rd_data,
-    output wire        fifo_empty,
-    output wire        fifo_rd_rst_busy
+    // Per-channel FIFO read ports (GT clk_txoutclk_bufg[ch] domain)
+    input  wire [7:0]  fifo_rd_clk,
+    input  wire [7:0]  fifo_rd_en,
+    output wire [127:0] fifo_rd_data,     // packed [ch*16 +: 16]
+    output wire [7:0]  fifo_empty,
+    output wire [7:0]  fifo_rd_rst_busy
 );
+    // Channel select: RBCP_ADDR[7:0] in 1..8
     wire addr_sel = (RBCP_ADDR[7:0] >= 8'd1) && (RBCP_ADDR[7:0] <= 8'd8);
 
     // ------------------------------------------
@@ -54,7 +52,6 @@ module rbcp_slow_control (
     reg        P0WE;
     reg        P1WE;
     reg [7:0]  P0_WD;
-    reg [7:0]  P0_CH;
     reg [7:0]  P0_UW;
 
     always @(posedge clk) begin
@@ -62,27 +59,43 @@ module rbcp_slow_control (
             P0WE <= 0;
             P1WE <= 0;
             P0_WD <= 0;
-            P0_CH <= 0;
             P0_UW <= 0;
         end else begin
             // 1st stage: latch WE + fields (RBCP_ADDR held until ACK, so stable)
             P0WE <= RBCP_WE;
             P0_WD <= RBCP_WD;
-            P0_CH <= RBCP_ADDR[7:0];      // channel select
             P0_UW <= RBCP_ADDR[15:8];     // underwater board select
             // 2nd stage
             P1WE <= P0WE;
         end
     end
 
-    // Single 32-bit FIFO write per RBCP write (addr_sel held stable until ACK).
-    // din[31:0] = {underwater, data, 8'h00, channel}
-    // FIFO width-converts 32->16 LSB-first, so the read side first gets
-    // [15:0] = {8'h00, channel} (routing), then [31:16] = {underwater, data}.
-    assign fifo_wr_en  = addr_sel && P0WE;
-    wire  fifo_wr_data = {P0_UW, P0_WD, 8'h00, P0_CH};
+    // One 16-bit FIFO write per RBCP write, routed to the selected channel FIFO.
+    // Full-gated so a full FIFO never drops a word.
+    wire [7:0] wr_en;
+    generate
+        genvar i;
+        for (i = 0; i < 8; i = i + 1) begin : g_rbcp_fifo
+            assign wr_en[i] = addr_sel && (RBCP_ADDR[7:0] == (i + 8'd1)) &&
+                              P0WE && !fifo_full[i];
 
-    // ACK: 3 cycles after WE (2-stage pipeline + ACK register)
+            fifo_rbcp u_fifo_rbcp (
+                .rst         (~rst_n),
+                .wr_clk      (clk),
+                .rd_clk      (fifo_rd_clk[i]),
+                .din         ({P0_UW, P0_WD}),
+                .wr_en       (wr_en[i]),
+                .rd_en       (fifo_rd_en[i]),
+                .dout        (fifo_rd_data[i*16 +: 16]),
+                .full        (fifo_full[i]),
+                .empty       (fifo_empty[i]),
+                .wr_rst_busy (fifo_wr_rst_busy[i]),
+                .rd_rst_busy (fifo_rd_rst_busy[i])
+            );
+        end
+    endgenerate
+
+    // ACK: 3 cycles after WE (2-stage pipeline + ACK register), fixed timing
     always @(posedge clk) begin
         if (!rst_n)
             RBCP_ACK <= 0;
@@ -92,22 +105,5 @@ module rbcp_slow_control (
 
     // RBCP_RD: always 0 (write-only slave)
     assign RBCP_RD = 8'h00;
-
-    // ------------------------------------------
-    // Async FIFO (IP fifo_rbcp): wr=CLK_200M, rd=GT clk_txoutclk_bufg
-    // ------------------------------------------
-    fifo_rbcp u_fifo_rbcp (
-        .rst         (~rst_n),
-        .wr_clk      (clk),
-        .rd_clk      (fifo_rd_clk),
-        .din         (fifo_wr_data),
-        .wr_en       (fifo_wr_en),
-        .rd_en       (fifo_rd_en),
-        .dout        (fifo_rd_data),
-        .full        (fifo_full),
-        .empty       (fifo_empty),
-        .wr_rst_busy (fifo_wr_rst_busy),
-        .rd_rst_busy (fifo_rd_rst_busy)
-    );
 
 endmodule

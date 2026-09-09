@@ -62,8 +62,6 @@ module sitcp_top(
 	wire	[15:0]	STATUS_VECTOR;	// out: Core status.[15:0]
 	wire			TCP_CLOSE_REQ;
 
-    wire            TCP_CLOSE_REQ;
-
 	WRAP_SiTCP_GMII_XC7K_32K	#(
 		.TIM_PERIOD			(8'd200)			// = System clock frequency(MHz), integer only
 	)

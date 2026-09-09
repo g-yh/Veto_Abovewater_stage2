@@ -29,7 +29,6 @@ module rst_dis(
     //output              clk_6P25M,
     input               pll_locked,
     output  reg         cfg_ad9528,
-    output  reg         rst_aurura,
     output              sysrst_glb_n                             
 
     );
@@ -129,7 +128,6 @@ module rst_dis(
     localparam  IDLE            = 3'b000;
     localparam  WAIT            = 3'b001;
     localparam  CFGC            = 3'b010;
-    localparam  RSTA            = 3'b011;
     localparam  DONE            = 3'b111;
 
     always @(posedge clk_in) begin
@@ -150,10 +148,7 @@ module rst_dis(
                 next_st = (WAIT_CNT == 1000000)? CFGC : WAIT;
             end
             CFGC : begin
-                next_st = (WAIT_CNT == 2000000)? RSTA : CFGC;
-            end
-            RSTA : begin
-                next_st = (WAIT_CNT == 2000200)? DONE : RSTA;
+                next_st = (WAIT_CNT == 2000000)? DONE : CFGC;
             end
             DONE : begin
                 next_st = IDLE;
@@ -169,27 +164,18 @@ module rst_dis(
         case (next_st)
             IDLE : begin
                 cfg_ad9528      <=  1'b0;
-                rst_aurura      <=  1'b0;
                 WAIT_CNT        <=  0;
             end
             WAIT : begin
                 cfg_ad9528      <=  1'b0;
-                rst_aurura      <=  1'b0;
                 WAIT_CNT        <=  WAIT_CNT + 1'b1;
             end
             CFGC : begin
                 cfg_ad9528      <=  1'b1;
-                rst_aurura      <=  1'b0;
-                WAIT_CNT        <=  WAIT_CNT + 1'b1;
-            end
-            RSTA : begin
-                cfg_ad9528      <=  1'b0;
-                rst_aurura      <=  1'b1;
                 WAIT_CNT        <=  WAIT_CNT + 1'b1;
             end
             DONE : begin
                 cfg_ad9528      <=  1'b0;
-                rst_aurura      <=  1'b0;
                 WAIT_CNT        <=  0;
             end
         endcase
