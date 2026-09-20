@@ -5,6 +5,8 @@
 //   Write: parses host RBCP write packets, fans out to one FIFO per GT channel.
 //   Read : on RBCP_RE, pops one byte from fifo_sc_tx[ch] and answers
 //          with a delayed ACK (RBCP_RD = byte, RBCP_ACK = 2 clocks).
+//   Ack  : when underwater sends fifo_ack with 0xFFFF marker,
+//          asserts RBCP_ACK to confirm W-packet processing done.
 //
 //   RBCP_ADDR[7:0]   (1~8)  : GT channel select
 //   RBCP_ADDR[15:8]  (1~8)  : underwater board select (write payload high byte)
@@ -14,13 +16,14 @@
 //     din[15:0] = {RBCP_ADDR[15:8], RBCP_WD}
 //   Read : each RBCP read pops 1 byte from fifo_sc_tx[ch].
 //     The host must send 2 collects per 16-bit word (low byte first).
+//   Ack  : underwater sends 0xFFF3+0xFFFF via fifo_ack when W-packet done.
 //
 //   Write clock is CLK_200M (clk); each FIFO's read clock is that GT
 //   channel's clk_txoutclk_bufg (sc_to_stage1_clk[ch]). main.v drains each FIFO
 //   on its own GT clock domain and sends the 16-bit word down that GT link.
 //
-//   RBCP timing: write ACK = 3 cycles from WE (fixed, independent of FIFO-full).
-//                read ACK = delayed 2 clocks (waits for data to arrive).
+//   RBCP timing: write ACK = when fifo_ack[ch] has 0xFFFF marker.
+//                read ACK = delayed 2 clocks.
 ////////////////////////////////////////////////////////////////////////////////
 
 module rbcp_slow_control (
@@ -46,7 +49,12 @@ module rbcp_slow_control (
     input  wire [127:0] sc_to_sitcp_dout,       // packed [ch*8 +: 8]
     input  wire [7:0]   sc_to_sitcp_valid,
     input  wire [7:0]   sc_to_sitcp_rd_rst_busy,
-    output reg  [7:0]   sc_to_sitcp_rd_en
+    output reg  [7:0]   sc_to_sitcp_rd_en,
+
+    // sc_to_sitcp_ack: read interface of fifo_ack (W-packet acks from underwater)
+    input  wire [127:0] sc_to_sitcp_ack_dout,   // packed [ch*16 +: 16]
+    input  wire [7:0]   sc_to_sitcp_ack_valid,
+    output reg  [7:0]   sc_to_sitcp_ack_rd_en
 );
 
     // ------------------------------------------
@@ -96,15 +104,6 @@ module rbcp_slow_control (
         end
     endgenerate
 
-    // Write ACK: 3 cycles after WE (fixed, independent of FIFO-full)
-    reg rbcp_ack_w;
-    always @(posedge clk) begin
-        if (!rst_n)
-            rbcp_ack_w <= 0;
-        else
-            rbcp_ack_w <= P1WE;
-    end
-
     // RBCP_RD (write side): always 0
     wire rbcp_rd_w = 8'h00;
 
@@ -137,11 +136,13 @@ module rbcp_slow_control (
             ack_cnt    <= 2'd0;
             rbcp_rd_r  <= 8'h0;
             rbcp_ack_r <= 1'b0;
-            sc_to_sitcp_rd_en <= 8'h0;
+            sc_to_sitcp_rd_en    <= 8'h0;
+            sc_to_sitcp_ack_rd_en <= 8'h0;
         end else begin
-            re_ff         <= RBCP_RE;
-            sc_to_sitcp_rd_en <= 8'h0;
-            rbcp_ack_r    <= 1'b0;
+            re_ff               <= RBCP_RE;
+            sc_to_sitcp_rd_en   <= 8'h0;
+            sc_to_sitcp_ack_rd_en <= 8'h0;
+            rbcp_ack_r          <= 1'b0;
             case (read_state)
                 RD_IDLE: begin
                     if (re_pedge) begin
@@ -157,7 +158,7 @@ module rbcp_slow_control (
                 RD_WAIT: begin
                     if (sc_to_sitcp_valid[ch] && !sc_to_sitcp_rd_rst_busy[ch]) begin
                         data_reg            <= sc_to_sitcp_dout[ch*8 +: 8];
-                        sc_to_sitcp_rd_en   <= (8'd1 << ch);
+                        sc_to_sitcp_rd_en <= (8'd1 << ch);
                         read_state          <= RD_ACK;
                     end
                 end
@@ -177,9 +178,41 @@ module rbcp_slow_control (
     end
 
     // ------------------------------------------
+    // ACK MONITOR: check all fifo_ack channels for 0xFFFF marker
+    //   When found, assert rbcp_ack_ack to confirm W-packet done.
+    //   Also asserts rd_en for any channel with valid data
+    //   so the ack FIFO doesn't accumulate.
+    // ------------------------------------------
+    reg  [7:0] ack_rd_en_next;
+    reg        rbcp_ack_ack_next;
+    integer    ach;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sc_to_sitcp_ack_rd_en <= 8'h0;
+            rbcp_ack_ack <= 1'b0;
+        end else begin
+            sc_to_sitcp_ack_rd_en <= ack_rd_en_next;
+            rbcp_ack_ack <= rbcp_ack_ack_next;
+        end
+    end
+
+    always @(*) begin
+        ack_rd_en_next = 8'h0;
+        rbcp_ack_ack_next = 1'b0;
+        for (ach = 0; ach < 8; ach = ach + 1) begin
+            if (sc_to_sitcp_ack_valid[ach]) begin
+                ack_rd_en_next[ach] = 1'b1;
+                if (sc_to_sitcp_ack_dout[ach*16+:16] == 16'hFFFF)
+                    rbcp_ack_ack_next = 1'b1;
+            end
+        end
+    end
+
+    // ------------------------------------------
     // Merged outputs
     // ------------------------------------------
-    assign RBCP_ACK = rbcp_ack_w | rbcp_ack_r;
+    assign RBCP_ACK = rbcp_ack_ack | rbcp_ack_r;
     assign RBCP_RD  = rbcp_rd_w  | rbcp_rd_r;
 
 endmodule

@@ -166,7 +166,11 @@ module main (
         .sc_to_sitcp_dout       (sc_to_sitcp_dout),
         .sc_to_sitcp_valid      (sc_to_sitcp_valid),
         .sc_to_sitcp_rd_rst_busy (sc_to_sitcp_rd_rst_busy),
-        .sc_to_sitcp_rd_en      (sc_to_sitcp_rd_en)
+        .sc_to_sitcp_rd_en      (sc_to_sitcp_rd_en),
+
+        .sc_to_sitcp_ack_dout   (ack_dout),
+        .sc_to_sitcp_ack_valid  (ack_valid),
+        .sc_to_sitcp_ack_rd_en  (ack_rd_en)
     );
 
     //--------------------------------
@@ -236,25 +240,37 @@ module main (
     //--------------------------------
     // RX data bridge: 8ch GTX (stage1) -> per-channel async FIFOs -> SiTCP TX
     //   Incoming frames (per channel ch, data clocked in clk_rxoutclk_bufg[ch]):
+    //     0xFFF3 -> 1x W-packet ack -> fifo_ack
     //     0xFFF2 -> 6x 16-bit PTP (only low 8 bit of each word is used) -> fifo_ptp
     //     0xFFF1 -> 1x 16-bit slow-control (return)                      -> fifo_sc_tx
     //     0xFFF0 -> 1x 16-bit board word (uw_addr) + EVT_ADW 16-bit words -> fifo_adc
     //   fifo_adc write is gated on prog_full so a full event (EVT_ADW words)
     //   always has room before the first word is written.
     //--------------------------------
-    localparam RX_PTP_HDR = 16'hFFF2;
-    localparam RX_SC_HDR = 16'hFFF1;
-    localparam RX_ADC_HDR = 16'hFFF0;
-    localparam RX_ADC_WORDS = 7'd64;  // 64 x 16-bit ADC words / event
+     localparam RX_PTP_HDR = 16'hFFF2;
+     localparam RX_SC_HDR = 16'hFFF1;
+     localparam RX_ADC_HDR = 16'hFFF0;
+     localparam RX_ACK_HDR = 16'hFFF3;
+     localparam RX_ADC_WORDS = 7'd64;  // 64 x 16-bit ADC words / event
 
     localparam [10:0] ADC_FIFO_FULL_THRESH = 11'd1984;  // write side >=1 event free (2048-64)
     localparam [11:0] ADC_FIFO_EMPT_THRESH = 12'd128;  // read side >=1 event (128 x 8-bit)
 
-    // per-channel captured board word (uw_addr); only low 8 bit meaningful
-    reg  [ 63:0] uw_addr_reg;  // packed [ch*8 +: 8]
+     // fifo_ack (8-in/8-out): W-packet acks from underwater via 0xFFF3
+     reg  [  7:0] ack_wr_en;
+     wire [  7:0] ack_empty;
+     wire [  7:0] ack_valid;
+     wire [127:0] ack_dout;
+     wire [  7:0] ack_full;
+     wire [  7:0] ack_wr_rst_busy;
+     wire [  7:0] ack_rd_rst_busy;
+     wire [  7:0] ack_rd_en;
 
-    // fifo_ptp (8-in/8-out): write side on rxoutclk, read side on CLK_200M
-    reg  [  7:0] ptp_wr_en;
+     // per-channel captured board word (uw_addr); only low 8 bit meaningful
+     reg  [ 63:0] uw_addr_reg;  // packed [ch*8 +: 8]
+
+     // fifo_ptp (8-in/8-out): write side on rxoutclk, read side on CLK_200M
+     reg  [  7:0] ptp_wr_en;
     reg  [  7:0] ptp_rd_en;
     reg  [ 63:0] ptp_din;  // packed [ch*8 +: 8]
     wire [ 63:0] ptp_dout;  // packed [ch*8 +: 8]
@@ -420,6 +436,22 @@ module main (
                 .prog_empty       (adc_prog_empty[fif]),
                 .wr_rst_busy      (adc_wr_rst_busy[fif]),
                 .rd_rst_busy      (adc_rd_rst_busy[fif])
+            );
+
+            // W-packet ack FIFO (0xFFF3 + 1 word)
+            fifo_sc_tx u_fifo_ack (
+                .rst        (~sysrst_glb_n),
+                .wr_clk     (clk_rxoutclock_bufg[fif]),
+                .rd_clk     (CLK_200M),
+                .din        (user_rx_data[fif*16+:16]),
+                .wr_en      (ack_wr_en[fif] && ~ack_full[fif] && ~ack_wr_rst_busy[fif]),
+                .rd_en      (ack_rd_en[fif]),
+                .dout       (ack_dout[fif*16+:16]),
+                .full       (ack_full[fif]),
+                .empty      (ack_empty[fif]),
+                .valid      (ack_valid[fif]),
+                .wr_rst_busy(ack_wr_rst_busy[fif]),
+                .rd_rst_busy(ack_rd_rst_busy[fif])
             );
         end
     endgenerate
