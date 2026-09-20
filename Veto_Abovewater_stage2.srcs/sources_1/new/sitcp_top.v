@@ -70,9 +70,9 @@ module sitcp_top(
 		.RST				(SYS_RST),		    // in	: System reset
 	// Configuration parameters
 		.FORCE_DEFAULTn		(1'b0),	            // in	: Load default parameters
-		.EXT_IP_ADDR		(32'h0000_0000),	// in	: IP address[31:0]
-		.EXT_TCP_PORT		(16'h0000),			// in	: TCP port #[15:0]
-		.EXT_RBCP_PORT		(16'h0000),			// in	: RBCP port #[15:0]
+		.EXT_IP_ADDR		({8'd192, 8'd168, 8'd31, 8'd16}),	// in	: IP address[31:0]
+		.EXT_TCP_PORT		(16'd24),			// in	: TCP port #[15:0]
+		.EXT_RBCP_PORT		(16'd4660),			// in	: RBCP port #[15:0]
 		.PHY_ADDR			(5'b0_0111),		// in	: PHY-device MIF address[4:0]
 	// EEPROM
 		.EEPROM_CS			(	),		        // out	: Chip select

@@ -74,3 +74,6 @@ set_property PACKAGE_PIN V24 [get_ports FAN_PWM]
 
 set_property IOSTANDARD LVCMOS33 [get_ports gt_link_up_led1]
 set_property PACKAGE_PIN U22 [get_ports gt_link_up_led1]
+
+set_property IOSTANDARD LVCMOS33 [get_ports sitcp_led2]
+set_property PACKAGE_PIN U23 [get_ports sitcp_led2]
