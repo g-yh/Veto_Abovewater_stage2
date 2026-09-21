@@ -203,7 +203,7 @@ module rbcp_slow_control (
         for (ach = 0; ach < 8; ach = ach + 1) begin
             if (sc_to_sitcp_ack_valid[ach]) begin
                 ack_rd_en_next[ach] = 1'b1;
-                if (sc_to_sitcp_ack_dout[ach*16+:16] == 16'hFFFF)
+                if (sc_to_sitcp_ack_dout[ach*16+:16] == 16'hFFF3)
                     rbcp_ack_ack_next = 1'b1;
             end
         end

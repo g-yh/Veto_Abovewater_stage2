@@ -335,7 +335,9 @@ module main (
                     if (gt_rx_data_valid[rxc]) begin
                         // IDLE (no active body): watch for a frame header
                         if (!rx_ptp_state && !rx_sc_state && !rx_adc_state) begin
-                            if (gt_rx_data[rxc*16+:16] == RX_PTP_HDR) begin
+                            if (gt_rx_data[rxc*16+:16] == RX_ACK_HDR) begin
+                                ack_wr_en[rxc] <= 1'b1;
+                            end else if (gt_rx_data[rxc*16+:16] == RX_PTP_HDR) begin
                                 rx_ptp_state <= 1'b1;
                                 rx_ptp_cnt   <= 3'd0;
                             end else if (gt_rx_data[rxc*16+:16] == RX_SC_HDR) begin
@@ -745,3 +747,12 @@ module main (
     // );
 
 endmodule
+                    ptp_wr_en[rxc] <= 1'b0;
+                    sc_wr_en[rxc]  <= 1'b0;
+                    adc_wr_en[rxc] <= 1'b0;
+                    ack_wr_en[rxc] <= 1'b0;
+                end else begin
+                    ptp_wr_en[rxc] <= 1'b0;
+                    sc_wr_en[rxc]  <= 1'b0;
+                    adc_wr_en[rxc] <= 1'b0;
+                    ack_wr_en[rxc] <= 1'b0;
