@@ -54,8 +54,11 @@ module rbcp_slow_control (
     // sc_to_sitcp_ack: read interface of fifo_ack (W-packet acks from underwater)
     input  wire [127:0] sc_to_sitcp_ack_dout,   // packed [ch*16 +: 16]
     input  wire [7:0]   sc_to_sitcp_ack_valid,
-    output reg  [7:0]   sc_to_sitcp_ack_rd_en
-);
+    output wire [7:0]   sc_to_sitcp_ack_rd_en,
+
+    // ack_empty: low means ack FIFO has data for this channel
+    input  wire [7:0]   ack_empty
+ );
 
     // ------------------------------------------
     // WRITE SLAVE: RBCP 2-stage pipeline
@@ -104,11 +107,31 @@ module rbcp_slow_control (
         end
     endgenerate
 
-    // RBCP_RD (write side): always 0
-    wire rbcp_rd_w = 8'h00;
 
-    // ------------------------------------------
-    // READ SLAVE: delayed ACK from fifo_sc_tx
+
+     // ------------------------------------------
+     // W-packet ACK: when ack_empty[ch] is low, read one word and assert RBCP_ACK
+     // ------------------------------------------
+     reg        rbcp_ack_w;
+     reg  [7:0] ack_rd_en_reg;
+
+     always @(posedge clk or negedge rst_n) begin
+         if (!rst_n) begin
+             ack_rd_en_reg <= 8'h0;
+         end else begin
+             ack_rd_en_reg <= 8'h0;
+             for (integer ach = 0; ach < 8; ach = ach + 1) begin
+                 if (!ack_empty[ach]) begin
+                     ack_rd_en_reg[ach] <= 1'b1;
+                     rbcp_ack_w <= 1'b1;
+                 end
+             end
+         end
+     end
+     assign sc_to_sitcp_ack_rd_en = ack_rd_en_reg;
+
+     // ------------------------------------------
+     // READ SLAVE: delayed ACK from fifo_sc_tx
     // ------------------------------------------
     localparam RD_IDLE = 2'd0;
     localparam RD_WAIT = 2'd1;
@@ -137,11 +160,9 @@ module rbcp_slow_control (
             rbcp_rd_r  <= 8'h0;
             rbcp_ack_r <= 1'b0;
             sc_to_sitcp_rd_en    <= 8'h0;
-            sc_to_sitcp_ack_rd_en <= 8'h0;
         end else begin
             re_ff               <= RBCP_RE;
             sc_to_sitcp_rd_en   <= 8'h0;
-            sc_to_sitcp_ack_rd_en <= 8'h0;
             rbcp_ack_r          <= 1'b0;
             case (read_state)
                 RD_IDLE: begin
@@ -177,42 +198,13 @@ module rbcp_slow_control (
         end
     end
 
-    // ------------------------------------------
-    // ACK MONITOR: check all fifo_ack channels for 0xFFFF marker
-    //   When found, assert rbcp_ack_ack to confirm W-packet done.
-    //   Also asserts rd_en for any channel with valid data
-    //   so the ack FIFO doesn't accumulate.
-    // ------------------------------------------
-    reg  [7:0] ack_rd_en_next;
-    reg        rbcp_ack_ack_next;
-    integer    ach;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            sc_to_sitcp_ack_rd_en <= 8'h0;
-            rbcp_ack_ack <= 1'b0;
-        end else begin
-            sc_to_sitcp_ack_rd_en <= ack_rd_en_next;
-            rbcp_ack_ack <= rbcp_ack_ack_next;
-        end
-    end
 
-    always @(*) begin
-        ack_rd_en_next = 8'h0;
-        rbcp_ack_ack_next = 1'b0;
-        for (ach = 0; ach < 8; ach = ach + 1) begin
-            if (sc_to_sitcp_ack_valid[ach]) begin
-                ack_rd_en_next[ach] = 1'b1;
-                if (sc_to_sitcp_ack_dout[ach*16+:16] == 16'hFFF3)
-                    rbcp_ack_ack_next = 1'b1;
-            end
-        end
-    end
 
     // ------------------------------------------
     // Merged outputs
     // ------------------------------------------
-    assign RBCP_ACK = rbcp_ack_ack | rbcp_ack_r;
-    assign RBCP_RD  = rbcp_rd_w  | rbcp_rd_r;
+    assign RBCP_ACK = rbcp_ack_w | rbcp_ack_r;
+    assign RBCP_RD  = rbcp_rd_r;
 
 endmodule
