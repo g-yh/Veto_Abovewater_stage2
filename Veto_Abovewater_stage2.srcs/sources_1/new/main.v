@@ -62,11 +62,14 @@ module main (
     output wire FAN_PWM
 );
 
+    wire [7:0] gt_link_up;
+    wire       tcp_open_ack;
+
     // assign gt_link_up_led1 = &gt_link_up;
     assign gt_link_up_led1 = gt_link_up[0];
     assign sitcp_led2 = tcp_open_ack;
 
-    assign SFP_TX_DISABLE  = 1'b0;
+    assign SFP_TX_DISABLE = 1'b0;
 
     wire [1:0] cfg_state_ad9528;
 
@@ -85,7 +88,7 @@ module main (
     assign FAN_PWM          = 1'b1;
 
     assign ad9528_rst_n     = pll_locked;
-    assign sysrst_glb_n     = pll_locked;
+
 
     assign ad9253_spi_rst_n = pll_locked;
     assign cfg_ad9528       = pll_locked;
@@ -102,6 +105,12 @@ module main (
     BUFG BUFG_200M (
         .O(CLK_200M),
         .I(SYSCLK_200M_buff)
+    );
+
+    // assign sysrst_glb_n     = pll_locked;
+    vio_0 vio_0_inst (
+        .clk(CLK_200M),
+        .probe_out0(sysrst_glb_n)
     );
 
     clk_wiz_aurora clk_wiz_aurora_inst (
@@ -131,20 +140,38 @@ module main (
     //--------------------------------
     // RBCP slow control (parse host RBCP writes, extract channel + data into FIFO)
     //--------------------------------
-    wire        rbcp_act;  // sitcp_top -> user (internal, not a top port)
-    wire        rbcp_we;
-    wire        rbcp_re;  // sitcp_top -> user (RBCP read request)
-    wire [31:0] rbcp_addr;
-    wire [ 7:0] rbcp_wd;
-    wire        rbcp_ack;  // write+read ACK -> sitcp_top
+    wire         rbcp_act;  // sitcp_top -> user (internal, not a top port)
+    wire         rbcp_we;
+    wire         rbcp_re;  // sitcp_top -> user (RBCP read request)
+    wire [ 31:0] rbcp_addr;
+    wire [  7:0] rbcp_wd;
+    wire         rbcp_ack;  // write+read ACK -> sitcp_top
     wire [  7:0] rbcp_rd;  // write+read data -> sitcp_top
 
     // Per-channel FIFO read ports (data flows toward stage1 boards)
     wire [  7:0] sc_to_stage1_clk;
-    reg  [  7:0] sc_to_stage1_rd_en;
-    wire [127:0] sc_to_stage1_rd_data;     // packed [ch*16 +: 16]
-    wire [  7:0] sc_to_stage1_empty;
-    wire [  7:0] sc_to_stage1_rd_rst_busy;
+    reg  [  7:0] sc_to_stage1_fifo_rd_en;
+    wire [127:0] sc_to_stage1;  // packed [ch*16 +: 16]
+    wire [  7:0] sc_to_stage1_fifo_empty;
+    wire [  7:0] sc_to_stage1_fifo_rd_rst_busy;
+    wire [  7:0] sc_to_stage1_valid;
+
+    // PTP result FIFO read side (declared before rbcp_slow_control).
+    wire [63:0] ptp_dout;   // packed [ch*8 +: 8]
+    wire [ 7:0] ptp_empty;
+    wire [ 7:0] ptp_valid;
+    wire [ 7:0] ptp_rd_rst_busy;
+    wire [ 7:0] ptp_rd_en;
+
+    // Declared before rbcp_slow_control and sitcp_top instantiations.
+    wire [ 7:0] ack_empty;              // packed [ch]
+    wire [63:0] sc_to_sitcp_dout;       // packed [ch*8 +: 8]
+    wire [ 7:0] sc_to_sitcp_empty;
+    wire [ 7:0] sc_to_sitcp_valid;
+    wire [ 7:0] sc_to_sitcp_rd_rst_busy;
+    wire [ 7:0] sc_to_sitcp_rd_en;
+    reg         tcp_wr;
+    reg  [7:0]  tcp_data;
 
     rbcp_slow_control u_rbcp_slow_control (
         .clk  (CLK_200M),
@@ -157,22 +184,27 @@ module main (
         .RBCP_RD  (rbcp_rd),
         .RBCP_ACK (rbcp_ack),
 
-        .sc_to_stage1_clk       (sc_to_stage1_clk),
-        .sc_to_stage1_rd_en     (sc_to_stage1_rd_en),
-        .sc_to_stage1_rd_data   (sc_to_stage1_rd_data),
-        .sc_to_stage1_empty     (sc_to_stage1_empty),
-        .sc_to_stage1_rd_rst_busy (sc_to_stage1_rd_rst_busy),
+        .sc_to_stage1_clk             (sc_to_stage1_clk),
+        .sc_to_stage1_fifo_rd_en      (sc_to_stage1_fifo_rd_en),
+        .sc_to_stage1                 (sc_to_stage1),
+        .sc_to_stage1_fifo_empty      (sc_to_stage1_fifo_empty),
+        .sc_to_stage1_fifo_rd_rst_busy(sc_to_stage1_fifo_rd_rst_busy),
+        .sc_to_stage1_valid           (sc_to_stage1_valid),
 
         .sc_to_sitcp_dout       (sc_to_sitcp_dout),
         .sc_to_sitcp_valid      (sc_to_sitcp_valid),
-        .sc_to_sitcp_rd_rst_busy (sc_to_sitcp_rd_rst_busy),
+        .sc_to_sitcp_empty      (sc_to_sitcp_empty),
+        .sc_to_sitcp_rd_rst_busy(sc_to_sitcp_rd_rst_busy),
         .sc_to_sitcp_rd_en      (sc_to_sitcp_rd_en),
 
-        .sc_to_sitcp_ack_dout   (ack_dout),
-        .sc_to_sitcp_ack_valid  (ack_valid),
-        .sc_to_sitcp_ack_rd_en  (ack_rd_en),
-        .ack_empty              (ack_empty)
-     );
+        .ptp_to_sitcp_dout       (ptp_dout),
+        .ptp_to_sitcp_valid      (ptp_valid),
+        .ptp_to_sitcp_empty      (ptp_empty),
+        .ptp_to_sitcp_rd_rst_busy(ptp_rd_rst_busy),
+        .ptp_to_sitcp_rd_en      (ptp_rd_en),
+
+        .ack_empty(ack_empty)
+    );
 
     //--------------------------------
     // SiTCP subsystem (GMII, ethernet via 1000BASE-X SFP)
@@ -226,7 +258,6 @@ module main (
         .ODIV2()
     );
 
-    wire [  7:0] gt_link_up;
     wire [ 15:0] rx_data_is_comma;
     wire [  7:0] gtx_rx_error;
     // GT interface outputs (per-channel clocks/data buses)
@@ -242,56 +273,48 @@ module main (
     // RX data bridge: 8ch GTX (stage1) -> per-channel async FIFOs -> SiTCP TX
     //   Incoming frames (per channel ch, data clocked in clk_rxoutclk_bufg[ch]):
     //     0xFFF3 -> 1x W-packet ack -> fifo_ack
-    //     0xFFF2 -> 6x 16-bit PTP (only low 8 bit of each word is used) -> fifo_ptp
+    //     0xFFF2 -> 48x 16-bit PTP (only low 8 bit of each word is used) -> fifo_ptp
     //     0xFFF1 -> 1x 16-bit slow-control (return)                      -> fifo_sc_tx
     //     0xFFF0 -> 1x 16-bit board word (uw_addr) + EVT_ADW 16-bit words -> fifo_adc
     //   fifo_adc write is gated on prog_full so a full event (EVT_ADW words)
     //   always has room before the first word is written.
     //--------------------------------
-     localparam RX_PTP_HDR = 16'hFFF2;
-     localparam RX_SC_HDR = 16'hFFF1;
-     localparam RX_ADC_HDR = 16'hFFF0;
-     localparam RX_ACK_HDR = 16'hFFF3;
-     localparam RX_ADC_WORDS = 7'd64;  // 64 x 16-bit ADC words / event
+    localparam RX_PTP_HDR = 16'hFFF2;
+    localparam [5:0] RX_PTP_BYTES = 6'd48;
+    localparam RX_SC_HDR = 16'hFFF1;
+    localparam RX_ADC_HDR = 16'hFFF0;
+    localparam RX_ACK_HDR = 16'hFFF3;
+    localparam RX_ADC_WORDS = 7'd64;  // 64 x 16-bit ADC words / event
 
     localparam [10:0] ADC_FIFO_FULL_THRESH = 11'd1984;  // write side >=1 event free (2048-64)
     localparam [11:0] ADC_FIFO_EMPT_THRESH = 12'd128;  // read side >=1 event (128 x 8-bit)
 
-     // fifo_ack (8-in/8-out): W-packet acks from underwater via 0xFFF3
-     reg  [  7:0] ack_wr_en;
-     reg [127:0] ack_din;    // per-channel ack header
-     wire [  7:0] ack_empty;
-     wire [  7:0] ack_valid;
-     wire [127:0] ack_dout;
-     wire [  7:0] ack_full;
-     wire [  7:0] ack_wr_rst_busy;
-     wire [  7:0] ack_rd_rst_busy;
-     wire [  7:0] ack_rd_en;
+    // fifo_ack (8-in/8-out): W-packet acks from underwater via 0xFFF3
+    reg  [  7:0] ack_wr_en;
+    reg  [127:0] ack_din;  // per-channel ack header
+    wire [  7:0] ack_rd_en;  // driven by ~ack_empty
+    assign ack_rd_en = ~ack_empty;
+    wire [  7:0] ack_valid;
+    wire [127:0] ack_dout;
+    wire [  7:0] ack_full;
+    wire [  7:0] ack_wr_rst_busy;
+    wire [  7:0] ack_rd_rst_busy;
 
-     // per-channel captured board word (uw_addr); only low 8 bit meaningful
-     reg  [ 63:0] uw_addr_reg;  // packed [ch*8 +: 8]
+    // per-channel captured board word (uw_addr); only low 8 bit meaningful
+    reg  [ 63:0] uw_addr_reg;  // packed [ch*8 +: 8]
 
-     // fifo_ptp (8-in/8-out): write side on rxoutclk, read side on CLK_200M
-     reg  [  7:0] ptp_wr_en;
-    reg  [  7:0] ptp_rd_en;
-    reg  [ 63:0] ptp_din;  // packed [ch*8 +: 8]
-    wire [ 63:0] ptp_dout;  // packed [ch*8 +: 8]
-    wire [  7:0] ptp_empty;
-    wire [  7:0] ptp_full;
-    wire [  7:0] ptp_valid;
-    wire [  7:0] ptp_wr_rst_busy;
-    wire [  7:0] ptp_rd_rst_busy;
+    // fifo_ptp (8-in/8-out): write side on rxoutclk, read side on CLK_200M.
+    // Its read side is now consumed by rbcp_slow_control (UDP R packets).
+    reg  [ 7:0] ptp_wr_en;
+    reg  [63:0] ptp_din;  // packed [ch*8 +: 8]
+    wire [ 7:0] ptp_full;
+    wire [ 7:0] ptp_wr_rst_busy;
 
     // fifo_sc_tx (16-in/8-out): write side rxoutclk, read side CLK_200M
     reg  [  7:0] sc_wr_en;
-    reg  [  7:0] sc_to_sitcp_rd_en;
     reg  [127:0] sc_to_sitcp_din;  // packed [ch*16 +: 16]
-    wire [127:0] sc_to_sitcp_dout;  // packed [ch*8 +: 8]
-    wire [  7:0] sc_to_sitcp_empty;
     wire [  7:0] sc_to_sitcp_full;
-    wire [  7:0] sc_to_sitcp_valid;
     wire [  7:0] sc_to_sitcp_wr_rst_busy;
-    wire [  7:0] sc_to_sitcp_rd_rst_busy;
 
     // fifo_adc (16-in/8-out): write side rxoutclk, read side CLK_200M
     reg  [  7:0] adc_wr_en;
@@ -306,6 +329,15 @@ module main (
     wire [  7:0] adc_wr_rst_busy;
     wire [  7:0] adc_rd_rst_busy;
 
+    reg [15:0] ack_cnt_main;
+
+    // RX parser per-channel state (declared outside generate, indexed by channel)
+    reg  [  7:0] rx_ptp_state;  // [ch]          0=IDLE,1=in PTP body
+    reg  [  7:0] rx_sc_state;   // [ch]          0=IDLE,1=in SC body
+    reg  [  7:0] rx_adc_state;  // [ch]          0=IDLE,1=in ADC body(addr or data)
+    reg  [ 47:0] rx_ptp_cnt;    // [ch*6 +: 6], count 0..47
+    reg  [ 55:0] rx_adc_cnt;    // [ch*7 +: 7]
+
     //--------------------------------
     // RX parser (per-channel, each on its own clk_rxoutclk_bufg[ch])
     //   Demuxes the three frame headers into the per-channel FIFOs.
@@ -313,73 +345,74 @@ module main (
     genvar rxc;
     generate
         for (rxc = 0; rxc < 8; rxc = rxc + 1) begin : g_rx_parse
-            // three independent body-detection flags + counters
-            reg       rx_ptp_state;  // 0=IDLE,1=in PTP body
-            reg       rx_sc_state;  // 0=IDLE,1=in SC body
-            reg       rx_adc_state;  // 0=IDLE,1=in ADC body(addr or data)
-            reg [2:0] rx_ptp_cnt;
-            reg [6:0] rx_adc_cnt;
-
             always @(posedge clk_rxoutclk_bufg[rxc] or negedge sysrst_glb_n) begin
                 if (!sysrst_glb_n) begin
-                    rx_ptp_state   <= 1'b0;
-                    rx_sc_state    <= 1'b0;
-                    rx_adc_state   <= 1'b0;
-                    rx_ptp_cnt     <= 3'd0;
-                    rx_adc_cnt     <= 7'd0;
-                     ptp_wr_en[rxc] <= 1'b0;
-                     sc_wr_en[rxc]  <= 1'b0;
-                     adc_wr_en[rxc] <= 1'b0;
-                     ack_wr_en[rxc] <= 1'b0;
-                 end else begin
-                     ptp_wr_en[rxc] <= 1'b0;
-                     sc_wr_en[rxc]  <= 1'b0;
-                     adc_wr_en[rxc] <= 1'b0;
-                     ack_wr_en[rxc] <= 1'b0;
+                    rx_ptp_state[rxc]    <= 1'b0;
+                    rx_sc_state[rxc]     <= 1'b0;
+                    rx_adc_state[rxc]    <= 1'b0;
+                    rx_ptp_cnt[rxc*6+:6] <= 6'd0;
+                    rx_adc_cnt[rxc*7+:7] <= 7'd0;
+                    ptp_wr_en[rxc] <= 1'b0;
+                    sc_wr_en[rxc]  <= 1'b0;
+                    adc_wr_en[rxc] <= 1'b0;
+                    ack_wr_en[rxc] <= 1'b0;
+                end else begin
+                    ptp_wr_en[rxc] <= 1'b0;
+                    sc_wr_en[rxc]  <= 1'b0;
+                    adc_wr_en[rxc] <= 1'b0;
+                    ack_wr_en[rxc] <= 1'b0;
                     if (gt_rx_data_valid[rxc]) begin
                         // IDLE (no active body): watch for a frame header
-                        if (!rx_ptp_state && !rx_sc_state && !rx_adc_state) begin
+                        if (!rx_ptp_state[rxc] && !rx_sc_state[rxc] && !rx_adc_state[rxc]) begin
                             if (gt_rx_data[rxc*16+:16] == RX_ACK_HDR) begin
                                 ack_wr_en[rxc] <= 1'b1;
                                 ack_din[rxc*16+:16] <= gt_rx_data[rxc*16+:16];
                             end else if (gt_rx_data[rxc*16+:16] == RX_PTP_HDR) begin
-                                rx_ptp_state <= 1'b1;
-                                rx_ptp_cnt   <= 3'd0;
+                                rx_ptp_state[rxc]    <= 1'b1;
+                                rx_ptp_cnt[rxc*6+:6] <= 6'd0;
                             end else if (gt_rx_data[rxc*16+:16] == RX_SC_HDR) begin
-                                rx_sc_state <= 1'b1;
+                                rx_sc_state[rxc] <= 1'b1;
                             end else if (gt_rx_data[rxc*16+:16] == RX_ADC_HDR) begin
                                 if (!adc_prog_full[rxc]) begin
-                                    rx_adc_state <= 1'b1;  // first body word is the addr word
-                                    rx_adc_cnt   <= 7'd0;
+                                    rx_adc_state[rxc]    <= 1'b1;  // first body word is the addr word
+                                    rx_adc_cnt[rxc*7+:7] <= 7'd0;
                                 end
                                 // else: fifo_adc has no room for a whole event, drop frame
                             end
                         end else begin
                             // in a frame body: dispatch by which header started it
-                            if (rx_ptp_state) begin
-                                ptp_wr_en[rxc]    <= 1'b1;
-                                ptp_din[rxc*8+:8] <= gt_rx_data[rxc*16+:8];
-                                if (rx_ptp_cnt == 3'd5) begin
-                                    rx_ptp_state <= 1'b0;
+                            if (rx_ptp_state[rxc]) begin
+                                // A new FFF2 during a body means the previous
+                                // non-fragmented frame timed out or was truncated.
+                                // Abandon it and start counting this frame again.
+                                if (gt_rx_data[rxc*16+:16] == RX_PTP_HDR) begin
+                                    rx_ptp_cnt[rxc*6+:6] <= 6'd0;
+                                    ptp_wr_en[rxc]       <= 1'b0;
                                 end else begin
-                                    rx_ptp_cnt <= rx_ptp_cnt + 3'd1;
+                                    ptp_wr_en[rxc]    <= 1'b1;
+                                    ptp_din[rxc*8+:8] <= gt_rx_data[rxc*16+:8];
+                                    if (rx_ptp_cnt[rxc*6+:6] == RX_PTP_BYTES - 6'd1) begin
+                                        rx_ptp_state[rxc] <= 1'b0;
+                                    end else begin
+                                        rx_ptp_cnt[rxc*6+:6] <= rx_ptp_cnt[rxc*6+:6] + 6'd1;
+                                    end
                                 end
-                            end else if (rx_sc_state) begin
-                                sc_wr_en[rxc]      <= 1'b1;
+                            end else if (rx_sc_state[rxc]) begin
+                                sc_wr_en[rxc]               <= 1'b1;
                                 sc_to_sitcp_din[rxc*16+:16] <= gt_rx_data[rxc*16+:16];
-                                rx_sc_state        <= 1'b0;
+                                rx_sc_state[rxc]            <= 1'b0;
                             end else begin  // rx_adc_state
-                                if (rx_adc_cnt == 7'd0) begin
+                                if (rx_adc_cnt[rxc*7+:7] == 7'd0) begin
                                     // first word = board addr (uw_addr), not stored
                                     uw_addr_reg[rxc*8+:8] <= gt_rx_data[rxc*16+:8];
-                                    rx_adc_cnt <= 7'd1;
+                                    rx_adc_cnt[rxc*7+:7]  <= 7'd1;
                                 end else begin
                                     adc_wr_en[rxc]      <= 1'b1;
                                     adc_din[rxc*16+:16] <= gt_rx_data[rxc*16+:16];
-                                    if (rx_adc_cnt == RX_ADC_WORDS) begin
-                                        rx_adc_state <= 1'b0;
+                                    if (rx_adc_cnt[rxc*7+:7] == RX_ADC_WORDS) begin
+                                        rx_adc_state[rxc] <= 1'b0;
                                     end else begin
-                                        rx_adc_cnt <= rx_adc_cnt + 7'd1;
+                                        rx_adc_cnt[rxc*7+:7] <= rx_adc_cnt[rxc*7+:7] + 7'd1;
                                     end
                                 end
                             end
@@ -390,6 +423,15 @@ module main (
         end
     endgenerate
 
+    // ack frames (0xFFF3) received on channel 0 (clk_rxoutclk_bufg[0] domain),
+    // one per ack_wr_en[0] pulse. Single always block -> no multi-driver.
+    always @(posedge clk_rxoutclk_bufg[0] or negedge sysrst_glb_n) begin
+        if (!sysrst_glb_n)
+            ack_cnt_main <= 16'd0;
+        else if (ack_wr_en[0])
+            ack_cnt_main <= ack_cnt_main + 16'd1;
+    end
+
     //--------------------------------
     // Per-channel RX FIFOs (write: clk_rxoutclk_bufg[ch], read: CLK_200M)
     //--------------------------------
@@ -397,11 +439,11 @@ module main (
     generate
         for (fif = 0; fif < 8; fif = fif + 1) begin : g_rx_fifo
             fifo_ptp u_fifo_ptp (
-                .rst        (sysrst_glb_n == 1'b0),
+                .rst        (~sysrst_glb_n),
                 .wr_clk     (clk_rxoutclk_bufg[fif]),
                 .rd_clk     (CLK_200M),
                 .din        (ptp_din[fif*8+:8]),
-                .wr_en      (ptp_wr_en[fif]),
+                .wr_en      (ptp_wr_en[fif] && ~ptp_full[fif]),
                 .rd_en      (ptp_rd_en[fif]),
                 .dout       (ptp_dout[fif*8+:8]),
                 .full       (ptp_full[fif]),
@@ -412,7 +454,7 @@ module main (
             );
 
             fifo_sc_tx u_fifo_sc_tx (
-                .rst        (sysrst_glb_n == 1'b0),
+                .rst        (~sysrst_glb_n),
                 .wr_clk     (clk_rxoutclk_bufg[fif]),
                 .rd_clk     (CLK_200M),
                 .din        (sc_to_sitcp_din[fif*16+:16]),
@@ -427,7 +469,7 @@ module main (
             );
 
             fifo_adc u_fifo_adc (
-                .rst              (sysrst_glb_n == 1'b0),
+                .rst              (~sysrst_glb_n),
                 .wr_clk           (clk_rxoutclk_bufg[fif]),
                 .rd_clk           (CLK_200M),
                 .din              (adc_din[fif*16+:16]),
@@ -446,9 +488,9 @@ module main (
             );
 
             // W-packet ack FIFO (0xFFF3 + 1 word)
-            fifo_sc_tx u_fifo_ack (
+            fifo_sc_ack u_fifo_ack (
                 .rst        (~sysrst_glb_n),
-                .wr_clk     (clk_rxoutclock_bufg[fif]),
+                .wr_clk     (clk_rxoutclk_bufg[fif]),
                 .rd_clk     (CLK_200M),
                 .din        (ack_din[fif*16+:16]),
                 .wr_en      (ack_wr_en[fif] && ~ack_full[fif] && ~ack_wr_rst_busy[fif]),
@@ -471,44 +513,42 @@ module main (
     //   When idle, the channel drives 16'hbc3c idle; gt_tx_data_valid=0 makes the
     //   interface force txcharisk=11 (K28.7|K28.3 idle).
     //   Standard-mode async FIFO: dout = head word whenever empty=0; asserting
-    //   rd_en fetches it now and pops at the next rising edge.  S_IDLE captures
-    //   dout with rd_en=1, S_SEND pushes the captured word out exactly once.
+    //   rd_en pops at the next rising edge.  SC_IDLE asserts rd_en,
+    //   SC_WAIT waits for sc_to_stage1_valid, then pushes the word out once.
     //--------------------------------
     genvar sc;
     generate
         for (sc = 0; sc < 8; sc = sc + 1) begin : g_sc_tx
-            localparam SC_IDLE = 1'b0;
-            localparam SC_SEND = 1'b1;
+            localparam SC_IDLE = 2'b00;
+            localparam SC_WAIT = 2'b01;
 
             assign sc_to_stage1_clk[sc] = clk_txoutclk_bufg[sc];
 
-            reg        sc_state;
-            reg [15:0] sc_dat;
+            reg [ 1:0] sc_state;
 
             always @(posedge clk_txoutclk_bufg[sc] or negedge sysrst_glb_n) begin
                 if (!sysrst_glb_n) begin
-                    sc_state               <= SC_IDLE;
-                    sc_dat                <= 16'h0000;
-                    sc_to_stage1_rd_en[sc] <= 1'b0;
-                    gt_tx_data[sc*16+:16] <= 16'hbc3c;
-                    gt_tx_data_valid[sc]  <= 1'b0;
+                    sc_state                    <= SC_IDLE;
+                    sc_to_stage1_fifo_rd_en[sc] <= 1'b0;
+                    gt_tx_data[sc*16+:16]       <= 16'hbc3c;
+                    gt_tx_data_valid[sc]        <= 1'b0;
                 end else begin
-                    sc_to_stage1_rd_en[sc] <= 1'b0;
+                    sc_to_stage1_fifo_rd_en[sc] <= 1'b0;
                     gt_tx_data[sc*16+:16] <= 16'hbc3c;  // default: idle
-                    gt_tx_data_valid[sc]  <= 1'b0;
+                    gt_tx_data_valid[sc] <= 1'b0;
                     case (sc_state)
                         SC_IDLE: begin
-                            if (!sc_to_stage1_empty[sc] && !sc_to_stage1_rd_rst_busy[sc]) begin
-                                sc_to_stage1_rd_en[sc] <= 1'b1;
-                                sc_dat                  <= sc_to_stage1_rd_data[sc*16+:16];
-                                sc_state       <= SC_SEND;
+                            if (!sc_to_stage1_fifo_empty[sc] && !sc_to_stage1_fifo_rd_rst_busy[sc]) begin
+                                sc_to_stage1_fifo_rd_en[sc] <= 1'b1;
+                                sc_state                    <= SC_WAIT;
                             end
                         end
-                        SC_SEND: begin
-                            // send the 16-bit payload once on this channel
-                            gt_tx_data[sc*16+:16] <= sc_dat;
-                            gt_tx_data_valid[sc]  <= 1'b1;
-                            sc_state              <= SC_IDLE;
+                        SC_WAIT: begin
+                            if (sc_to_stage1_valid[sc]) begin
+                                gt_tx_data[sc*16+:16] <= sc_to_stage1[sc*16+:16];
+                                gt_tx_data_valid[sc]  <= 1'b1;
+                                sc_state              <= SC_IDLE;
+                            end
                         end
                         default: sc_state <= SC_IDLE;
                     endcase
@@ -538,47 +578,38 @@ module main (
 
     //--------------------------------
     // SiTCP TX 轮询发送状态机（CLK_200M 域）
-    //   优先级: PTP > ADC 事件(fifo_adc) > 空闲
+    //   优先级: ADC 事件(fifo_adc) > 空闲；PTP 已改为 RBCP UDP 读取
     //   仲裁 round-robin 扫描 rr_idx[0..7]
     //   每字节受 TCP_TX_FULL 背压;FIFO 读用 valid 握手(与 stage1 相同)
-    //   - PTP: 固定读 6 字节(凑满 6 才发,中途空则等待)
     //   - ADC: 头 {stage1_addr(=ch+1), uw_addr} + 固定读 128 字节
     //   - IDLE: 无数据则 rr_idx 递增轮询(不发任何字节)
     //   (慢控返回已改走 UDP,由 rbcp_slow_control 读从处理,fifo_sc_tx 不再进 TCP)
+    //   PTP results are stored in fifo_ptp and read through RBCP UDP R packets.
+    //   The TCP state machine below now carries ADC event data only.
     //--------------------------------
     localparam TX_IDLE = 3'd0;
     localparam TX_ADSET = 3'd1;  // ADC 头字节0: stage1_addr
     localparam TX_ADUW = 3'd2;  // ADC 头字节1: uw_addr
     localparam TX_ADATA = 3'd3;  // ADC 数据 128 字节
-    localparam TX_PTP = 3'd4;  // PTP 固定读 6 次
 
     reg [2:0] tx_state;
     reg [2:0] rr_idx;
-    reg [2:0] ptp_tx_cnt;
     reg [7:0] evt_tx_cnt;  // 0..129 (2 头 + 128 数据)
-    reg       tcp_wr;
-    reg [7:0] tcp_data;
 
     always @(posedge CLK_200M or negedge sysrst_glb_n) begin
         if (!sysrst_glb_n) begin
             tx_state   <= TX_IDLE;
             rr_idx     <= 3'd0;
-            ptp_tx_cnt <= 3'd0;
             evt_tx_cnt <= 8'd0;
             tcp_wr     <= 1'b0;
             tcp_data   <= 8'd0;
-            ptp_rd_en  <= 8'd0;
             adc_rd_en  <= 8'd0;
         end else begin
             tcp_wr    <= 1'b0;
-            ptp_rd_en <= 8'd0;
             adc_rd_en <= 8'd0;
             case (tx_state)
                 TX_IDLE: begin
-                    if (~ptp_empty[rr_idx]) begin
-                        ptp_tx_cnt <= 3'd0;
-                        tx_state   <= TX_PTP;
-                    end else if (~adc_prog_empty[rr_idx]) begin
+                    if (~adc_prog_empty[rr_idx]) begin
                         evt_tx_cnt <= 8'd0;
                         tx_state   <= TX_ADSET;
                     end else begin
@@ -619,27 +650,27 @@ module main (
                         end
                     end
                 end
-                // ---- PTP：最高优先，读 6 字节 ----
-                TX_PTP: begin
-                    if (!tcp_tx_full) begin
-                        ptp_rd_en <= (8'd1 << rr_idx);
-                        if (ptp_valid[rr_idx]) begin
-                            tcp_wr   <= 1'b1;
-                            tcp_data <= ptp_dout[rr_idx*8+:8];
-                            if (ptp_tx_cnt == 3'd5) begin
-                                tx_state <= TX_IDLE;  // 6 字节发完
-                                rr_idx   <= rr_idx + 3'd1;
-                            end else begin
-                                ptp_tx_cnt <= ptp_tx_cnt + 3'd1;
-                            end
-                        end else begin
-                            tcp_wr <= 1'b0;
-                        end
-                    end
-                end
                 default: tx_state <= TX_IDLE;
             endcase
         end
     end
+
+    ila_gt_tx u_ila_gt_tx (
+        .clk   (clk_txoutclk_bufg[0]),
+        .probe0(gt_tx_data[15:0]),
+        .probe1(gt_tx_data_valid[0])
+    );
+
+    ila_gt_rx u_ila_gt_rx (
+        .clk   (clk_rxoutclk_bufg[0]),
+        .probe0(gt_rx_data[15:0]),
+        .probe1(gt_rx_data_valid[0]),
+        .probe2(gt_link_up[0]),
+        .probe3(gtx_cpll_is_lock[0]),
+        .probe4(ack_cnt_main),
+        .probe5(rx_sc_state[0]),
+        .probe6(sc_to_sitcp_din[15:0]),
+        .probe7(sc_wr_en[0])
+    );
 
 endmodule
