@@ -14,3 +14,8 @@
 *.wdb
 *.backup.jou
 *.backup.log
+
+# Xilinx xvlog/xsim temporary files
+xsim.dir/
+xvlog.pb
+hs_err_pid*.dmp

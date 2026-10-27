@@ -70,6 +70,8 @@ module interface_gtx_8ch(
     //   otherwise keep resetting until that condition holds.
     //------------------------------------------
     reg  rx_pma_rst_n_flag [0:7];
+    (* ASYNC_REG = "TRUE" *) reg rx_pma_rst_n_flag_meta [0:7];
+    (* ASYNC_REG = "TRUE" *) reg rx_pma_rst_n_flag_sync [0:7];
     reg  rx_pma_rst_n [0:7];
 
     generate
@@ -89,8 +91,10 @@ module interface_gtx_8ch(
 
             // pma reset driven in DRP clock domain
             always @(posedge clk_drp_100M) begin
+                rx_pma_rst_n_flag_meta[i] <= rx_pma_rst_n_flag[i];
+                rx_pma_rst_n_flag_sync[i] <= rx_pma_rst_n_flag_meta[i];
                 if (rx_reset_done[i]) begin
-                    rx_pma_rst_n[i] <= rx_pma_rst_n_flag[i];
+                    rx_pma_rst_n[i] <= rx_pma_rst_n_flag_sync[i];
                 end else begin  // a reset will keep 2 periods
                     rx_pma_rst_n[i] <= 1;
                 end

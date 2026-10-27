@@ -260,6 +260,24 @@ module main (
 
     wire [ 15:0] rx_data_is_comma;
     wire [  7:0] gtx_rx_error;
+    wire [  7:0] gt_rx_reset_n;
+    wire [  7:0] gt_tx_reset_n;
+
+    genvar grst;
+    generate
+        for (grst = 0; grst < 8; grst = grst + 1) begin : g_gt_reset_sync
+            reset_sync u_rx_reset_sync (
+                .clk   (clk_rxoutclk_bufg[grst]),
+                .arst_n(sysrst_glb_n),
+                .rst_n (gt_rx_reset_n[grst])
+            );
+            reset_sync u_tx_reset_sync (
+                .clk   (clk_txoutclk_bufg[grst]),
+                .arst_n(sysrst_glb_n),
+                .rst_n (gt_tx_reset_n[grst])
+            );
+        end
+    endgenerate
     // GT interface outputs (per-channel clocks/data buses)
     wire [  7:0] clk_txoutclk_bufg;
     wire [  7:0] clk_rxoutclk_bufg;
@@ -302,6 +320,10 @@ module main (
 
     // per-channel captured board word (uw_addr); only low 8 bit meaningful
     reg  [ 63:0] uw_addr_reg;  // packed [ch*8 +: 8]
+    // uw_addr_reg is stable for the whole ADC event (the first FIFO word
+    // follows it by 64 data words), so a two-flop synchronizer is sufficient.
+    (* ASYNC_REG = "TRUE" *) reg [63:0] uw_addr_meta;
+    (* ASYNC_REG = "TRUE" *) reg [63:0] uw_addr_sync;
 
     // fifo_ptp (8-in/8-out): write side on rxoutclk, read side on CLK_200M.
     // Its read side is now consumed by rbcp_slow_control (UDP R packets).
@@ -345,13 +367,14 @@ module main (
     genvar rxc;
     generate
         for (rxc = 0; rxc < 8; rxc = rxc + 1) begin : g_rx_parse
-            always @(posedge clk_rxoutclk_bufg[rxc] or negedge sysrst_glb_n) begin
-                if (!sysrst_glb_n) begin
+            always @(posedge clk_rxoutclk_bufg[rxc]) begin
+                if (!gt_rx_reset_n[rxc]) begin
                     rx_ptp_state[rxc]    <= 1'b0;
                     rx_sc_state[rxc]     <= 1'b0;
                     rx_adc_state[rxc]    <= 1'b0;
                     rx_ptp_cnt[rxc*6+:6] <= 6'd0;
                     rx_adc_cnt[rxc*7+:7] <= 7'd0;
+                    uw_addr_reg[rxc*8+:8] <= 8'd0;
                     ptp_wr_en[rxc] <= 1'b0;
                     sc_wr_en[rxc]  <= 1'b0;
                     adc_wr_en[rxc] <= 1'b0;
@@ -423,10 +446,23 @@ module main (
         end
     endgenerate
 
+    // Quasi-static board-address CDC. The source word changes only at the
+    // beginning of a complete ADC event; the event is not consumed by the
+    // 200 MHz side until all 64 data words have reached fifo_adc.
+    always @(posedge CLK_200M) begin
+        if (!sysrst_glb_n) begin
+            uw_addr_meta <= 64'd0;
+            uw_addr_sync <= 64'd0;
+        end else begin
+            uw_addr_meta <= uw_addr_reg;
+            uw_addr_sync <= uw_addr_meta;
+        end
+    end
+
     // ack frames (0xFFF3) received on channel 0 (clk_rxoutclk_bufg[0] domain),
     // one per ack_wr_en[0] pulse. Single always block -> no multi-driver.
-    always @(posedge clk_rxoutclk_bufg[0] or negedge sysrst_glb_n) begin
-        if (!sysrst_glb_n)
+    always @(posedge clk_rxoutclk_bufg[0]) begin
+        if (!gt_rx_reset_n[0])
             ack_cnt_main <= 16'd0;
         else if (ack_wr_en[0])
             ack_cnt_main <= ack_cnt_main + 16'd1;
@@ -439,7 +475,7 @@ module main (
     generate
         for (fif = 0; fif < 8; fif = fif + 1) begin : g_rx_fifo
             fifo_ptp u_fifo_ptp (
-                .rst        (~sysrst_glb_n),
+                .rst        (~gt_rx_reset_n[fif]),
                 .wr_clk     (clk_rxoutclk_bufg[fif]),
                 .rd_clk     (CLK_200M),
                 .din        (ptp_din[fif*8+:8]),
@@ -454,7 +490,7 @@ module main (
             );
 
             fifo_sc_tx u_fifo_sc_tx (
-                .rst        (~sysrst_glb_n),
+                .rst        (~gt_rx_reset_n[fif]),
                 .wr_clk     (clk_rxoutclk_bufg[fif]),
                 .rd_clk     (CLK_200M),
                 .din        (sc_to_sitcp_din[fif*16+:16]),
@@ -469,7 +505,7 @@ module main (
             );
 
             fifo_adc u_fifo_adc (
-                .rst              (~sysrst_glb_n),
+                .rst              (~gt_rx_reset_n[fif]),
                 .wr_clk           (clk_rxoutclk_bufg[fif]),
                 .rd_clk           (CLK_200M),
                 .din              (adc_din[fif*16+:16]),
@@ -489,7 +525,7 @@ module main (
 
             // W-packet ack FIFO (0xFFF3 + 1 word)
             fifo_sc_ack u_fifo_ack (
-                .rst        (~sysrst_glb_n),
+                .rst        (~gt_rx_reset_n[fif]),
                 .wr_clk     (clk_rxoutclk_bufg[fif]),
                 .rd_clk     (CLK_200M),
                 .din        (ack_din[fif*16+:16]),
@@ -526,8 +562,8 @@ module main (
 
             reg [ 1:0] sc_state;
 
-            always @(posedge clk_txoutclk_bufg[sc] or negedge sysrst_glb_n) begin
-                if (!sysrst_glb_n) begin
+            always @(posedge clk_txoutclk_bufg[sc]) begin
+                if (!gt_tx_reset_n[sc]) begin
                     sc_state                    <= SC_IDLE;
                     sc_to_stage1_fifo_rd_en[sc] <= 1'b0;
                     gt_tx_data[sc*16+:16]       <= 16'hbc3c;
@@ -591,12 +627,16 @@ module main (
     localparam TX_ADSET = 3'd1;  // ADC 头字节0: stage1_addr
     localparam TX_ADUW = 3'd2;  // ADC 头字节1: uw_addr
     localparam TX_ADATA = 3'd3;  // ADC 数据 128 字节
+    localparam TX_ADPIPE = 3'd4; // 寄存 FIFO 输出，切断 200 MHz 多路选择长路径
 
     reg [2:0] tx_state;
     reg [2:0] rr_idx;
     reg [7:0] evt_tx_cnt;  // 0..129 (2 头 + 128 数据)
+    reg [7:0] adc_pipe_data;
+    reg [7:0] adc_event_uw;
+    reg       adc_pipe_valid;
 
-    always @(posedge CLK_200M or negedge sysrst_glb_n) begin
+    always @(posedge CLK_200M) begin
         if (!sysrst_glb_n) begin
             tx_state   <= TX_IDLE;
             rr_idx     <= 3'd0;
@@ -604,12 +644,17 @@ module main (
             tcp_wr     <= 1'b0;
             tcp_data   <= 8'd0;
             adc_rd_en  <= 8'd0;
+            adc_event_uw   <= 8'd0;
+            adc_pipe_data  <= 8'd0;
+            adc_pipe_valid <= 1'b0;
         end else begin
             tcp_wr    <= 1'b0;
             adc_rd_en <= 8'd0;
             case (tx_state)
                 TX_IDLE: begin
+                    adc_pipe_valid <= 1'b0;
                     if (~adc_prog_empty[rr_idx]) begin
+                        adc_event_uw <= uw_addr_sync[rr_idx*8+:8];
                         evt_tx_cnt <= 8'd0;
                         tx_state   <= TX_ADSET;
                     end else begin
@@ -627,7 +672,7 @@ module main (
                 end
                 TX_ADUW: begin
                     if (!tcp_tx_full) begin
-                        tcp_data   <= uw_addr_reg[rr_idx*8+:8];
+                        tcp_data   <= adc_event_uw;
                         tcp_wr     <= 1'b1;
                         evt_tx_cnt <= 8'd2;
                         tx_state   <= TX_ADATA;
@@ -637,16 +682,25 @@ module main (
                     if (!tcp_tx_full) begin
                         adc_rd_en <= (8'd1 << rr_idx);
                         if (adc_valid[rr_idx]) begin
-                            tcp_wr   <= 1'b1;
-                            tcp_data <= adc_dout[rr_idx*8+:8];
-                            if (evt_tx_cnt == 8'd129) begin
-                                tx_state <= TX_IDLE;  // 128 字节发完
-                                rr_idx   <= rr_idx + 3'd1;
-                            end else begin
-                                evt_tx_cnt <= evt_tx_cnt + 8'd1;
-                            end
+                            adc_pipe_data  <= adc_dout[rr_idx*8+:8];
+                            adc_pipe_valid <= 1'b1;
+                            tx_state       <= TX_ADPIPE;
                         end else begin
                             tcp_wr <= 1'b0;
+                        end
+                    end
+                end
+                TX_ADPIPE: begin
+                    if (!tcp_tx_full && adc_pipe_valid) begin
+                        tcp_data       <= adc_pipe_data;
+                        tcp_wr         <= 1'b1;
+                        adc_pipe_valid <= 1'b0;
+                        if (evt_tx_cnt == 8'd129) begin
+                            tx_state <= TX_IDLE;  // 128 字节发完
+                            rr_idx   <= rr_idx + 3'd1;
+                        end else begin
+                            evt_tx_cnt <= evt_tx_cnt + 8'd1;
+                            tx_state   <= TX_ADATA;
                         end
                     end
                 end
@@ -673,4 +727,23 @@ module main (
         .probe7(sc_wr_en[0])
     );
 
+endmodule
+
+module reset_sync (
+    input  wire clk,
+    input  wire arst_n,
+    output reg  rst_n
+);
+
+    (* ASYNC_REG = "TRUE" *) reg sync_meta;
+
+    always @(posedge clk or negedge arst_n) begin
+        if (!arst_n) begin
+            sync_meta <= 1'b0;
+            rst_n     <= 1'b0;
+        end else begin
+            sync_meta <= 1'b1;
+            rst_n     <= sync_meta;
+        end
+    end
 endmodule

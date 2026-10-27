@@ -13,6 +13,8 @@
 //   RBCP_ADDR[7:0]   (1~8)  : GT channel select
 //   RBCP_ADDR[15:8]  (1~8)  : underwater board select (write payload high byte)
 //   RBCP_ADDR[15:8]  (F1~F8): stage1 PTP start / stage2 fifo_ptp read mode
+//   RBCP_ADDR[15:8]  (FA)   : slow-control result-available status
+//   RBCP_ADDR[15:8]  (FB)   : drain stale slow-control response bytes
 //   RBCP_WD [7:0]    (1~8)  : write payload low byte
 //
 //   Write clock is CLK_200M (clk); each FIFO's read clock is that GT
@@ -114,6 +116,12 @@ module rbcp_slow_control (
     localparam RD_CAP     = 3'd2;
     localparam RD_ACK     = 3'd3;
     localparam RD_CAP_LOW = 3'd4;
+    localparam RD_FLUSH   = 3'd5;
+
+    // 200 MHz * 200000 = approximately 1 ms.  This is long enough for an
+    // old response still travelling through the stage1 TX pipeline to arrive
+    // and be discarded before a new read transaction starts.
+    localparam [19:0] FLUSH_QUIET_CYCLES = 20'd200000;
 
     reg  [2:0] read_state;
     reg  [2:0] ch;
@@ -122,6 +130,7 @@ module rbcp_slow_control (
     reg  [63:0] sc_low_cache;   // packed [ch*8 +: 8]
     reg  [7:0] sc_low_pending;
     reg [24:0] read_wait_cnt;
+    reg [19:0] flush_quiet_cnt;
     reg        re_ff;
     reg  [7:0] rbcp_rd_r;
     reg        rbcp_ack_r;
@@ -133,7 +142,10 @@ module rbcp_slow_control (
     wire       is_ptp_addr = (RBCP_ADDR[15:8] >= 8'hF1) &&
                              (RBCP_ADDR[15:8] <= 8'hF8);
 
-    always @(posedge clk or negedge rst_n) begin
+    // Keep all FIFO read enables on a synchronous reset.  Driving a BRAM FIFO
+    // EN pin from an asynchronously-reset register can corrupt the FIFO during
+    // reset assertion (Vivado REQP-1839/REQP-1840).
+    always @(posedge clk) begin
         if (!rst_n) begin
             re_ff             <= 1'b0;
             read_state        <= RD_IDLE;
@@ -143,6 +155,7 @@ module rbcp_slow_control (
             sc_low_cache      <= 64'h0;
             sc_low_pending    <= 8'h0;
             read_wait_cnt     <= 25'd0;
+            flush_quiet_cnt   <= 20'd0;
             rbcp_rd_r         <= 8'h0;
             rbcp_ack_r        <= 1'b0;
             sc_to_sitcp_rd_en <= 8'h0;
@@ -165,6 +178,13 @@ module rbcp_slow_control (
                                 // Non-blocking slow-control result availability check.
                                 data_reg   <= {7'd0, ~sc_to_sitcp_empty[ch_sel[2:0]]};
                                 read_state <= RD_ACK;
+                            end else if (RBCP_ADDR[15:8] == 8'hFB) begin
+                                // Transaction barrier: discard both bytes from all
+                                // pending/queued responses and any cached low byte.
+                                ch                      <= ch_sel[2:0];
+                                flush_quiet_cnt         <= 20'd0;
+                                sc_low_pending[ch_sel[2:0]] <= 1'b0;
+                                read_state              <= RD_FLUSH;
                             end else if (!is_ptp_addr && sc_low_pending[ch_sel[2:0]]) begin
                                 // Return the low byte captured together with the
                                 // preceding high-byte read.
@@ -227,6 +247,20 @@ module rbcp_slow_control (
                         read_state        <= RD_ACK;
                     end
                 end
+                RD_FLUSH: begin
+                    if (!sc_to_sitcp_empty[ch] && !sc_to_sitcp_rd_rst_busy[ch]) begin
+                        sc_to_sitcp_rd_en <= (8'd1 << ch);
+                        flush_quiet_cnt   <= 20'd0;
+                    end else begin
+                        sc_to_sitcp_rd_en <= 8'h0;
+                        if (flush_quiet_cnt >= FLUSH_QUIET_CYCLES) begin
+                            data_reg      <= 8'h00;
+                            read_state    <= RD_ACK;
+                        end else begin
+                            flush_quiet_cnt <= flush_quiet_cnt + 20'd1;
+                        end
+                    end
+                end
                 RD_ACK: begin
                     rbcp_rd_r  <= data_reg;
                     rbcp_ack_r <= 1'b1;
@@ -245,9 +279,16 @@ module rbcp_slow_control (
     reg     ptp_start_req_d;
     integer ach;
 
+    // C1..C8 flush a per-underwater PTP output FIFO.  D1..D8 issue the
+    // zero-delay PTP reset.  F1..F8 start PTP.  All are consumed by stage1,
+    // so stage2 must ACK them without waiting for an underwater ACK.
     wire is_ptp_start_wr = RBCP_WE && addr_sel &&
-                           (RBCP_ADDR[15:8] >= 8'hF1) &&
-                           (RBCP_ADDR[15:8] <= 8'hF8);
+                           (((RBCP_ADDR[15:8] >= 8'hC1) &&
+                             (RBCP_ADDR[15:8] <= 8'hC8)) ||
+                            ((RBCP_ADDR[15:8] >= 8'hD1) &&
+                             (RBCP_ADDR[15:8] <= 8'hD8)) ||
+                            ((RBCP_ADDR[15:8] >= 8'hF1) &&
+                             (RBCP_ADDR[15:8] <= 8'hF8)));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
