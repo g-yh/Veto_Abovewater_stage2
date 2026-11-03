@@ -4,11 +4,21 @@ set_property IOSTANDARD DIFF_SSTL15 [get_ports SYSCLK_200MP_IN]
 set_property IOSTANDARD DIFF_SSTL15 [get_ports SYSCLK_200MN_IN]
 create_clock -period 5.000 -name SYSCLK_200MP_IN -waveform {0.000 2.500} [get_ports SYSCLK_200MP_IN]
 
-# The VIO reset is asynchronous by design. Each GT RX/TX clock domain now has
-# its own reset synchronizer, and the FIFO IP synchronizes its reset internally.
+# VIO global reset is asynchronous by design. Each GT RX/TX clock domain has
+# a local asynchronous-assert/synchronous-release reset synchronizer.
 set_false_path \
-    -from [get_cells -hierarchical -filter {NAME =~ *vio_0_inst*Probe_out_reg*}] \
-    -to [get_clocks -regexp {.*(RXOUTCLK|TXOUTCLK).*}]
+    -from [get_cells -hierarchical -filter {NAME =~ *vio_0_inst*Probe_out_reg*}]
+
+# GT status flags cross into RXOUTCLK/DRP-clock synchronizers.
+set_max_delay -datapath_only 5.000 \
+    -from [get_cells -hierarchical -filter {NAME =~ *rx_pma_rst_n_flag_reg* && IS_SEQUENTIAL == 1}] \
+    -to [get_cells -hierarchical -filter {NAME =~ *rx_pma_rst_n_flag_meta_reg*}]
+
+# GTXE2 RXRESETDONE is an asynchronous status output without a directly
+# constraining launch register in the fabric. It enters an ASYNC_REG two-flop
+# synchronizer in the 100 MHz DRP-clock domain.
+set_false_path \
+    -to [get_cells -hierarchical -filter {NAME =~ *rx_reset_done_meta_reg*}]
 
 # Bound the first stage of the quasi-static ADC board-address synchronizer.
 # The source data is held constant for a complete 64-word ADC event.

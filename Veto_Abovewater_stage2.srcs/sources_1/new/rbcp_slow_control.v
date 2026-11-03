@@ -280,15 +280,17 @@ module rbcp_slow_control (
     integer ach;
 
     // C1..C8 flush a per-underwater PTP output FIFO.  D1..D8 issue the
-    // zero-delay PTP reset.  F1..F8 start PTP.  All are consumed by stage1,
-    // so stage2 must ACK them without waiting for an underwater ACK.
+    // zero-delay PTP reset.  F1..F8 start PTP.  A0 resets only stage2's
+    // selected ADC data path.  Stage2 must ACK these local commands without
+    // waiting for an underwater ACK.
     wire is_ptp_start_wr = RBCP_WE && addr_sel &&
                            (((RBCP_ADDR[15:8] >= 8'hC1) &&
                              (RBCP_ADDR[15:8] <= 8'hC8)) ||
                             ((RBCP_ADDR[15:8] >= 8'hD1) &&
                              (RBCP_ADDR[15:8] <= 8'hD8)) ||
                             ((RBCP_ADDR[15:8] >= 8'hF1) &&
-                             (RBCP_ADDR[15:8] <= 8'hF8)));
+                             (RBCP_ADDR[15:8] <= 8'hF8)) ||
+                            (RBCP_ADDR[15:8] == 8'hA0));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

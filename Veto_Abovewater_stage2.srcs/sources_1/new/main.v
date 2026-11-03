@@ -107,7 +107,8 @@ module main (
         .I(SYSCLK_200M_buff)
     );
 
-    // assign sysrst_glb_n     = pll_locked;
+    // Debug global reset. Keep it asynchronous and distribute it through the
+    // local reset synchronizers below.
     vio_0 vio_0_inst (
         .clk(CLK_200M),
         .probe_out0(sysrst_glb_n)
@@ -305,7 +306,9 @@ module main (
     localparam RX_ADC_WORDS = 7'd64;  // 64 x 16-bit ADC words / event
 
     localparam [10:0] ADC_FIFO_FULL_THRESH = 11'd1984;  // write side >=1 event free (2048-64)
-    localparam [11:0] ADC_FIFO_EMPT_THRESH = 12'd128;  // read side >=1 event (128 x 8-bit)
+    // prog_empty asserts at count <= threshold. One complete 128-byte
+    // event therefore deasserts it when the threshold is 127.
+    localparam [11:0] ADC_FIFO_EMPT_THRESH = 12'd127;
 
     // fifo_ack (8-in/8-out): W-packet acks from underwater via 0xFFF3
     reg  [  7:0] ack_wr_en;
@@ -680,12 +683,15 @@ module main (
                 end
                 TX_ADATA: begin
                     if (!tcp_tx_full) begin
-                        adc_rd_en <= (8'd1 << rr_idx);
+                        // FWFT FIFO: adc_dout is already the head byte while
+                        // adc_valid is high. Capture it and pop that word.
                         if (adc_valid[rr_idx]) begin
+                            adc_rd_en      <= (8'd1 << rr_idx);
                             adc_pipe_data  <= adc_dout[rr_idx*8+:8];
                             adc_pipe_valid <= 1'b1;
                             tx_state       <= TX_ADPIPE;
                         end else begin
+                            adc_rd_en <= 8'd0;
                             tcp_wr <= 1'b0;
                         end
                     end
@@ -705,7 +711,7 @@ module main (
                     end
                 end
                 default: tx_state <= TX_IDLE;
-            endcase
+                endcase
         end
     end
 
@@ -727,12 +733,47 @@ module main (
         .probe7(sc_wr_en[0])
     );
 
+    // Stage2 ADC RX parser / FIFO write-side ILA.
+    // Clock domain: clk_rxoutclk_bufg[0].
+    // 9 probes, 10 ports including clk.
+    ila_stage2_adc_rx u_ila_stage2_adc_rx (
+        .clk   (clk_rxoutclk_bufg[0]),
+        .probe0(gt_rx_data[15:0]),          // 16
+        .probe1(gt_rx_data_valid[0]),       // 1
+        .probe2(gt_rx_reset_n[0]),          // 1
+        .probe3(rx_adc_state[0]),           // 1
+        .probe4(rx_adc_cnt[6:0]),           // 7
+        .probe5(adc_wr_en[0]),              // 1
+        .probe6(adc_din[15:0]),             // 16
+        .probe7(adc_prog_full[0]),          // 1
+        .probe8(uw_addr_reg[7:0])           // 8
+    );
+
+    // Stage2 ADC FIFO read / TCP transmit-side ILA.
+    // Clock domain: CLK_200M.
+    // 10 probes, 11 ports including clk.
+    ila_stage2_adc_tx u_ila_stage2_adc_tx (
+        .clk   (CLK_200M),
+        .probe0(adc_prog_empty[0]),         // 1
+        .probe1(adc_valid[0]),              // 1
+        .probe2(adc_dout[7:0]),             // 8
+        .probe3(tx_state[2:0]),             // 3
+        .probe4(evt_tx_cnt[7:0]),           // 8
+        .probe5(rr_idx[2:0]),               // 3
+        .probe6(tcp_data[7:0]),             // 8
+        .probe7(tcp_wr),                    // 1
+        .probe8(tcp_tx_full),               // 1
+        .probe9(adc_event_uw[7:0]),          // 8
+        .probe10(adc_empty[0]),
+        .probe11(adc_rd_en[0])
+    );
+
 endmodule
 
 module reset_sync (
     input  wire clk,
     input  wire arst_n,
-    output reg  rst_n
+    (* ASYNC_REG = "TRUE" *) output reg rst_n
 );
 
     (* ASYNC_REG = "TRUE" *) reg sync_meta;
