@@ -53,7 +53,7 @@ module main (
     output wire ad9528_sysref_req,
 
     // GT link status LEDs
-    output wire gt_link_up_led1,  // all 8 FE gt_link_up high
+    output wire gt_link_up_led1,  // high only when all FE GT links are down
     output wire sitcp_led2,
 
     // LED
@@ -65,8 +65,8 @@ module main (
     wire [7:0] gt_link_up;
     wire       tcp_open_ack;
 
-    // assign gt_link_up_led1 = &gt_link_up;
-    assign gt_link_up_led1 = gt_link_up[0];
+    assign gt_link_up_led1 = ~(|gt_link_up);
+    // assign gt_link_up_led1 = gt_link_up[0];
     assign sitcp_led2 = tcp_open_ack;
 
     assign SFP_TX_DISABLE = 1'b0;
