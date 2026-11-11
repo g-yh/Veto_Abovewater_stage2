@@ -203,6 +203,7 @@ module main (
         .ptp_to_sitcp_empty      (ptp_empty),
         .ptp_to_sitcp_rd_rst_busy(ptp_rd_rst_busy),
         .ptp_to_sitcp_rd_en      (ptp_rd_en),
+        .ptp_frame_ready         (ptp_frame_complete_sync),
 
         .ack_empty(ack_empty)
     );
@@ -292,23 +293,28 @@ module main (
     // RX data bridge: 8ch GTX (stage1) -> per-channel async FIFOs -> SiTCP TX
     //   Incoming frames (per channel ch, data clocked in clk_rxoutclk_bufg[ch]):
     //     0xFFF3 -> 1x W-packet ack -> fifo_ack
-    //     0xFFF2 -> 48x 16-bit PTP (only low 8 bit of each word is used) -> fifo_ptp
+    //     0xFFF2 -> 54x 16-bit PTP wire frame (low 8 bits):
+    //               A5 5A seq_hi seq_lo + 48-byte payload + 5A A5
+    //               -> fifo_ptp
     //     0xFFF1 -> 1x 16-bit slow-control (return)                      -> fifo_sc_tx
     //     0xFFF0 -> 1x 16-bit board word (uw_addr) + EVT_ADW 16-bit words -> fifo_adc
-    //   fifo_adc write is gated on prog_full so a full event (EVT_ADW words)
-    //   always has room before the first word is written.
+    //               The board word is stored in fifo_adc with every event so
+    //               the address cannot be overwritten by a later UW event.
+    //   fifo_adc write is gated on prog_full so the board word plus all
+    //   EVT_ADW data words have room before the frame is accepted.
     //--------------------------------
     localparam RX_PTP_HDR = 16'hFFF2;
-    localparam [5:0] RX_PTP_BYTES = 6'd48;
+    localparam [5:0] RX_PTP_BYTES = 6'd54;
     localparam RX_SC_HDR = 16'hFFF1;
     localparam RX_ADC_HDR = 16'hFFF0;
     localparam RX_ACK_HDR = 16'hFFF3;
     localparam RX_ADC_WORDS = 7'd64;  // 64 x 16-bit ADC words / event
 
-    localparam [10:0] ADC_FIFO_FULL_THRESH = 11'd1984;  // write side >=1 event free (2048-64)
-    // prog_empty asserts at count <= threshold. One complete 128-byte
-    // event therefore deasserts it when the threshold is 127.
-    localparam [11:0] ADC_FIFO_EMPT_THRESH = 12'd127;
+    // Reserve room for one complete 65-word event.
+    localparam [10:0] ADC_FIFO_FULL_THRESH = 11'd1983;
+    // The 16->8 FIFO turns those 65 words into 130 bytes. prog_empty
+    // deasserts at count > 129, i.e. only when one complete event is queued.
+    localparam [11:0] ADC_FIFO_EMPT_THRESH = 12'd129;
 
     // fifo_ack (8-in/8-out): W-packet acks from underwater via 0xFFF3
     reg  [  7:0] ack_wr_en;
@@ -321,12 +327,9 @@ module main (
     wire [  7:0] ack_wr_rst_busy;
     wire [  7:0] ack_rd_rst_busy;
 
-    // per-channel captured board word (uw_addr); only low 8 bit meaningful
+    // Captured board word for ILA/debug only. The data path stores the
+    // address together with every event in fifo_adc.
     reg  [ 63:0] uw_addr_reg;  // packed [ch*8 +: 8]
-    // uw_addr_reg is stable for the whole ADC event (the first FIFO word
-    // follows it by 64 data words), so a two-flop synchronizer is sufficient.
-    (* ASYNC_REG = "TRUE" *) reg [63:0] uw_addr_meta;
-    (* ASYNC_REG = "TRUE" *) reg [63:0] uw_addr_sync;
 
     // fifo_ptp (8-in/8-out): write side on rxoutclk, read side on CLK_200M.
     // Its read side is now consumed by rbcp_slow_control (UDP R packets).
@@ -362,6 +365,9 @@ module main (
     reg  [  7:0] rx_adc_state;  // [ch]          0=IDLE,1=in ADC body(addr or data)
     reg  [ 47:0] rx_ptp_cnt;    // [ch*6 +: 6], count 0..47
     reg  [ 55:0] rx_adc_cnt;    // [ch*7 +: 7]
+    reg  [  7:0] ptp_frame_complete;
+    (* ASYNC_REG = "TRUE" *) reg [7:0] ptp_frame_complete_meta;
+    (* ASYNC_REG = "TRUE" *) reg [7:0] ptp_frame_complete_sync;
 
     //--------------------------------
     // RX parser (per-channel, each on its own clk_rxoutclk_bufg[ch])
@@ -377,6 +383,7 @@ module main (
                     rx_adc_state[rxc]    <= 1'b0;
                     rx_ptp_cnt[rxc*6+:6] <= 6'd0;
                     rx_adc_cnt[rxc*7+:7] <= 7'd0;
+                    ptp_frame_complete[rxc] <= 1'b0;
                     uw_addr_reg[rxc*8+:8] <= 8'd0;
                     ptp_wr_en[rxc] <= 1'b0;
                     sc_wr_en[rxc]  <= 1'b0;
@@ -396,6 +403,7 @@ module main (
                             end else if (gt_rx_data[rxc*16+:16] == RX_PTP_HDR) begin
                                 rx_ptp_state[rxc]    <= 1'b1;
                                 rx_ptp_cnt[rxc*6+:6] <= 6'd0;
+                                ptp_frame_complete[rxc] <= 1'b0;
                             end else if (gt_rx_data[rxc*16+:16] == RX_SC_HDR) begin
                                 rx_sc_state[rxc] <= 1'b1;
                             end else if (gt_rx_data[rxc*16+:16] == RX_ADC_HDR) begin
@@ -414,11 +422,13 @@ module main (
                                 if (gt_rx_data[rxc*16+:16] == RX_PTP_HDR) begin
                                     rx_ptp_cnt[rxc*6+:6] <= 6'd0;
                                     ptp_wr_en[rxc]       <= 1'b0;
+                                    ptp_frame_complete[rxc] <= 1'b0;
                                 end else begin
                                     ptp_wr_en[rxc]    <= 1'b1;
                                     ptp_din[rxc*8+:8] <= gt_rx_data[rxc*16+:8];
                                     if (rx_ptp_cnt[rxc*6+:6] == RX_PTP_BYTES - 6'd1) begin
                                         rx_ptp_state[rxc] <= 1'b0;
+                                        ptp_frame_complete[rxc] <= 1'b1;
                                     end else begin
                                         rx_ptp_cnt[rxc*6+:6] <= rx_ptp_cnt[rxc*6+:6] + 6'd1;
                                     end
@@ -429,8 +439,15 @@ module main (
                                 rx_sc_state[rxc]            <= 1'b0;
                             end else begin  // rx_adc_state
                                 if (rx_adc_cnt[rxc*7+:7] == 7'd0) begin
-                                    // first word = board addr (uw_addr), not stored
+                                    // First body word = board address. Store two
+                                    // identical bytes; the read side uses one
+                                    // and discards the other.
                                     uw_addr_reg[rxc*8+:8] <= gt_rx_data[rxc*16+:8];
+                                    adc_wr_en[rxc] <= 1'b1;
+                                    adc_din[rxc*16+:16] <= {
+                                        gt_rx_data[rxc*16+:8],
+                                        gt_rx_data[rxc*16+:8]
+                                    };
                                     rx_adc_cnt[rxc*7+:7]  <= 7'd1;
                                 end else begin
                                     adc_wr_en[rxc]      <= 1'b1;
@@ -449,16 +466,15 @@ module main (
         end
     endgenerate
 
-    // Quasi-static board-address CDC. The source word changes only at the
-    // beginning of a complete ADC event; the event is not consumed by the
-    // 200 MHz side until all 64 data words have reached fifo_adc.
+    // PTP complete flags are produced in the per-channel RX clock domains
+    // and consumed by the RBCP read interface in CLK_200M.
     always @(posedge CLK_200M) begin
         if (!sysrst_glb_n) begin
-            uw_addr_meta <= 64'd0;
-            uw_addr_sync <= 64'd0;
+            ptp_frame_complete_meta <= 8'd0;
+            ptp_frame_complete_sync <= 8'd0;
         end else begin
-            uw_addr_meta <= uw_addr_reg;
-            uw_addr_sync <= uw_addr_meta;
+            ptp_frame_complete_meta <= ptp_frame_complete;
+            ptp_frame_complete_sync <= ptp_frame_complete_meta;
         end
     end
 
@@ -620,7 +636,8 @@ module main (
     //   优先级: ADC 事件(fifo_adc) > 空闲；PTP 已改为 RBCP UDP 读取
     //   仲裁 round-robin 扫描 rr_idx[0..7]
     //   每字节受 TCP_TX_FULL 背压;FIFO 读用 valid 握手(与 stage1 相同)
-    //   - ADC: 头 {stage1_addr(=ch+1), uw_addr} + 固定读 128 字节
+    //   - ADC: 头 {stage1_addr(=ch+1), uw_addr} + 固定读 128 字节。
+    //           uw_addr is now taken from the event's own FIFO word.
     //   - IDLE: 无数据则 rr_idx 递增轮询(不发任何字节)
     //   (慢控返回已改走 UDP,由 rbcp_slow_control 读从处理,fifo_sc_tx 不再进 TCP)
     //   PTP results are stored in fifo_ptp and read through RBCP UDP R packets.
@@ -628,9 +645,11 @@ module main (
     //--------------------------------
     localparam TX_IDLE = 3'd0;
     localparam TX_ADSET = 3'd1;  // ADC 头字节0: stage1_addr
-    localparam TX_ADUW = 3'd2;  // ADC 头字节1: uw_addr
+    localparam TX_ADUW = 3'd2;  // 读取 event 自带 uw_addr 的第一个字节
     localparam TX_ADATA = 3'd3;  // ADC 数据 128 字节
     localparam TX_ADPIPE = 3'd4; // 寄存 FIFO 输出，切断 200 MHz 多路选择长路径
+    localparam TX_ADUWSEND = 3'd5;  // 发送 uw_addr
+    localparam TX_ADUDROP = 3'd6;   // 丢弃重复的 uw_addr 第二个字节
 
     reg [2:0] tx_state;
     reg [2:0] rr_idx;
@@ -657,7 +676,6 @@ module main (
                 TX_IDLE: begin
                     adc_pipe_valid <= 1'b0;
                     if (~adc_prog_empty[rr_idx]) begin
-                        adc_event_uw <= uw_addr_sync[rr_idx*8+:8];
                         evt_tx_cnt <= 8'd0;
                         tx_state   <= TX_ADSET;
                     end else begin
@@ -675,10 +693,35 @@ module main (
                 end
                 TX_ADUW: begin
                     if (!tcp_tx_full) begin
-                        tcp_data   <= adc_event_uw;
-                        tcp_wr     <= 1'b1;
-                        evt_tx_cnt <= 8'd2;
-                        tx_state   <= TX_ADATA;
+                        if (adc_valid[rr_idx]) begin
+                            adc_rd_en      <= (8'd1 << rr_idx);
+                            adc_event_uw   <= adc_dout[rr_idx*8+:8];
+                            adc_pipe_data  <= adc_dout[rr_idx*8+:8];
+                            adc_pipe_valid <= 1'b1;
+                            tx_state       <= TX_ADUWSEND;
+                        end else begin
+                            adc_rd_en <= 8'd0;
+                            tcp_wr    <= 1'b0;
+                        end
+                    end
+                end
+                TX_ADUWSEND: begin
+                    if (!tcp_tx_full && adc_pipe_valid) begin
+                        tcp_data       <= adc_pipe_data;
+                        tcp_wr         <= 1'b1;
+                        adc_pipe_valid <= 1'b0;
+                        evt_tx_cnt     <= 8'd2;
+                        tx_state       <= TX_ADUDROP;
+                    end
+                end
+                TX_ADUDROP: begin
+                    // The board address was written twice to make the
+                    // 16-to-8 conversion independent of byte order.
+                    if (adc_valid[rr_idx]) begin
+                        adc_rd_en <= (8'd1 << rr_idx);
+                        tx_state  <= TX_ADATA;
+                    end else begin
+                        adc_rd_en <= 8'd0;
                     end
                 end
                 TX_ADATA: begin

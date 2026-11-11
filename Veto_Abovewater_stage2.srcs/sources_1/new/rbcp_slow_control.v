@@ -53,6 +53,7 @@ module rbcp_slow_control (
     input  wire [ 7:0] ptp_to_sitcp_valid,
     input  wire [ 7:0] ptp_to_sitcp_empty,
     input  wire [ 7:0] ptp_to_sitcp_rd_rst_busy,
+    input  wire [ 7:0] ptp_frame_ready,
     output reg  [ 7:0] ptp_to_sitcp_rd_en,
 
     // ack_empty: low means ack FIFO (u_fifo_ack in main) has data for this channel
@@ -171,8 +172,13 @@ module rbcp_slow_control (
                         if (ch_valid) begin
                             read_wait_cnt <= 25'd0;
                             if (RBCP_ADDR[15:8] == 8'hF9) begin
-                                // Non-blocking PTP FIFO availability check.
-                                data_reg   <= {7'd0, ~ptp_to_sitcp_empty[ch_sel[2:0]]};
+                                // bit0: FIFO non-empty; bit1: complete frame.
+                                data_reg <= {
+                                    6'd0,
+                                    ptp_frame_ready[ch_sel[2:0]] &
+                                        ~ptp_to_sitcp_empty[ch_sel[2:0]],
+                                    ~ptp_to_sitcp_empty[ch_sel[2:0]]
+                                };
                                 read_state <= RD_ACK;
                             end else if (RBCP_ADDR[15:8] == 8'hFA) begin
                                 // Non-blocking slow-control result availability check.
@@ -279,15 +285,17 @@ module rbcp_slow_control (
     reg     ptp_start_req_d;
     integer ach;
 
-    // C1..C8 flush a per-underwater PTP output FIFO.  D1..D8 issue the
-    // zero-delay PTP reset.  F1..F8 start PTP.  A0 resets only stage2's
-    // selected ADC data path.  Stage2 must ACK these local commands without
+    // C1..C8 flush a per-underwater PTP output FIFO.  D0 resets all eight
+    // channels of the selected Stage1; D1..D8 reset one channel.
+    // F1..F8 start PTP.  A0 resets only stage2's selected ADC data path.
+    // Stage2 must ACK these local commands without
     // waiting for an underwater ACK.
     wire is_ptp_start_wr = RBCP_WE && addr_sel &&
                            (((RBCP_ADDR[15:8] >= 8'hC1) &&
                              (RBCP_ADDR[15:8] <= 8'hC8)) ||
-                            ((RBCP_ADDR[15:8] >= 8'hD1) &&
-                             (RBCP_ADDR[15:8] <= 8'hD8)) ||
+                             ((RBCP_ADDR[15:8] >= 8'hD1) &&
+                              (RBCP_ADDR[15:8] <= 8'hD8)) ||
+                            (RBCP_ADDR[15:8] == 8'hD0) ||
                             ((RBCP_ADDR[15:8] >= 8'hF1) &&
                              (RBCP_ADDR[15:8] <= 8'hF8)) ||
                             (RBCP_ADDR[15:8] == 8'hA0));

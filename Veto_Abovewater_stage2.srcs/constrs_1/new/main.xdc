@@ -20,11 +20,21 @@ set_max_delay -datapath_only 5.000 \
 set_false_path \
     -to [get_cells -hierarchical -filter {NAME =~ *rx_reset_done_meta_reg*}]
 
-# Bound the first stage of the quasi-static ADC board-address synchronizer.
-# The source data is held constant for a complete 64-word ADC event.
+# Per-channel PTP frame-complete flags are quasi-static synchronizer inputs
+# from independent GT RXOUTCLK domains into the 200 MHz RBCP clock domain.
+set_property ASYNC_REG TRUE [get_cells -hierarchical -filter {
+    NAME =~ *ptp_frame_complete_meta_reg[*]
+}]
+set_property ASYNC_REG TRUE [get_cells -hierarchical -filter {
+    NAME =~ *ptp_frame_complete_sync_reg[*]
+}]
 set_max_delay -datapath_only 5.000 \
-    -from [get_cells -hierarchical -filter {NAME =~ *uw_addr_reg_reg*}] \
-    -to [get_cells -hierarchical -filter {NAME =~ *uw_addr_meta_reg*}]
+    -from [get_cells -hierarchical -filter {
+        NAME =~ *ptp_frame_complete_reg[*]
+    }] \
+    -to [get_cells -hierarchical -filter {
+        NAME =~ *ptp_frame_complete_meta_reg[*]
+    }]
 
 # Vendor-provided constraints from the original aurora_to_sitcp project.
 # They constrain the intentional 200 MHz <-> GMII 125 MHz resampling paths.
