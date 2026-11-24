@@ -107,12 +107,34 @@ module main (
         .I(SYSCLK_200M_buff)
     );
 
-    // Debug global reset. Keep it asynchronous and distribute it through the
-    // local reset synchronizers below.
-    vio_0 vio_0_inst (
-        .clk(CLK_200M),
-        .probe_out0(sysrst_glb_n)
-    );
+    //------------------------------------------------------------------
+    // 全局复位
+    //   * PLL 未锁定期间一直保持复位
+    //   * 任一路 GT 链路状态发生变化（插拔光纤）都会重新触发约 10 ms 复位
+    //   这样不需要 VIO，也能用光纤插拔作为手动复位后门。
+    //------------------------------------------------------------------
+    reg [7:0]  gt_link_up_meta;
+    reg [7:0]  gt_link_up_sync;
+    reg [19:0] glb_rst_hold;
+
+    wire gt_link_changed = |(gt_link_up_sync ^ gt_link_up_meta);
+
+    always @(posedge CLK_100M or negedge pll_locked) begin
+        if (!pll_locked) begin
+            gt_link_up_meta <= 8'd0;
+            gt_link_up_sync <= 8'd0;
+            glb_rst_hold    <= 20'hFFFFF;
+        end else begin
+            gt_link_up_meta <= gt_link_up;
+            gt_link_up_sync <= gt_link_up_meta;
+            if (gt_link_changed)
+                glb_rst_hold <= 20'hFFFFF;
+            else if (glb_rst_hold != 20'd0)
+                glb_rst_hold <= glb_rst_hold - 20'd1;
+        end
+    end
+
+    assign sysrst_glb_n = pll_locked && (glb_rst_hold == 20'd0);
 
     clk_wiz_aurora clk_wiz_aurora_inst (
         // Clock out ports
