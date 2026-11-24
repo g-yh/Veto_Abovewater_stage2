@@ -109,28 +109,72 @@ module main (
 
     //------------------------------------------------------------------
     // 全局复位
-    //   * PLL 未锁定期间一直保持复位
-    //   * 任一路 GT 链路状态发生变化（插拔光纤）都会重新触发约 10 ms 复位
-    //   这样不需要 VIO，也能用光纤插拔作为手动复位后门。
+    //   * PLL 未锁定期间保持复位
+    //   * 只有"已经稳定 up >= 10 ms"的 GT 通道掉线（拔光纤）才触发复位
+    //     —— 空通道的 RX 抖动不会再把整板拖在复位里
+    //   * 上电/复位后 167 ms 内忽略链路事件
+    //   * 复位脉冲约 10 ms @100 MHz
     //------------------------------------------------------------------
-    reg [7:0]  gt_link_up_meta;
-    reg [7:0]  gt_link_up_sync;
-    reg [19:0] glb_rst_hold;
+    // 1 = 插拔光纤也复位；0 = 只用 PLL 锁定（调试用）
+    localparam USE_LINK_RESET = 1;
 
-    wire gt_link_changed = |(gt_link_up_sync ^ gt_link_up_meta);
+    reg [7:0]  lu_s1;
+    reg [7:0]  lu_s2;
+    reg [7:0]  lu_prev;
+    reg [7:0]  lu_armed;
+    reg [19:0] lu_up_cnt [0:7];
+    reg [23:0] glb_grace;
+    reg [27:0] glb_blank;   // 复位后 200 ms 内忽略链路事件
+    reg [19:0] glb_rst_hold;
+    integer li;
+
+    wire link_fell = |(lu_armed & lu_prev & ~lu_s2);
 
     always @(posedge CLK_100M or negedge pll_locked) begin
         if (!pll_locked) begin
-            gt_link_up_meta <= 8'd0;
-            gt_link_up_sync <= 8'd0;
-            glb_rst_hold    <= 20'hFFFFF;
+            lu_s1 <= 0;
+            lu_s2 <= 0;
+            lu_prev <= 0;
+            lu_armed <= 0;
+            glb_grace <= 24'hFFFFFF;
+            glb_blank <= 28'd0;
+            glb_rst_hold <= 20'hFFFFF;
+            for (li = 0; li <= 7; li = li + 1) begin
+                lu_up_cnt[li] <= 20'd0;
+            end
         end else begin
-            gt_link_up_meta <= gt_link_up;
-            gt_link_up_sync <= gt_link_up_meta;
-            if (gt_link_changed)
+            lu_s1 <= gt_link_up;
+            lu_s2 <= lu_s1;
+            lu_prev <= lu_s2;
+
+            if (glb_grace != 24'd0) begin
+                glb_grace <= glb_grace - 24'd1;
+            end
+            if (glb_blank != 28'd0) begin
+                glb_blank <= glb_blank - 28'd1;
+            end
+
+            for (li = 0; li <= 7; li = li + 1) begin
+                if (lu_s2[li]) begin
+                    if (lu_up_cnt[li] != 20'hFFFFF) begin
+                        lu_up_cnt[li] <= lu_up_cnt[li] + 20'd1;
+                    end
+                    if (lu_up_cnt[li] >= 20'd1_000_000) begin
+                        lu_armed[li] <= 1'b1;
+                    end
+                end else begin
+                    lu_up_cnt[li] <= 20'd0;
+                    lu_armed[li] <= 1'b0;
+                end
+            end
+
+            if (link_fell && USE_LINK_RESET && (glb_grace == 24'd0) &&
+                (glb_blank == 28'd0)) begin
                 glb_rst_hold <= 20'hFFFFF;
-            else if (glb_rst_hold != 20'd0)
+                glb_blank    <= 28'd20_000_000;   // 200 ms @100 MHz
+            end else if (glb_rst_hold != 20'd0) begin
                 glb_rst_hold <= glb_rst_hold - 20'd1;
+            end
         end
     end
 
